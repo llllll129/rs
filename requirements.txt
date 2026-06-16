@@ -1,6 +1,6 @@
 streamlit==1.44.0
 chromadb
-sentence-transformers
 openai
+numpy
 PyPDF2
 python-docx
