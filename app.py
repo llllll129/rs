@@ -40,7 +40,8 @@ API_KEY = "sk-8c8010eb5e9541b5a9db0c6df557fa7c"
 
 @st.cache_resource
 def init():
-        model = SentenceTransformer("shibing624/text2vec-base-chinese")
+    # 使用国内镜像下载模型
+    model = SentenceTransformer("shibing624/text2vec-base-chinese")
     
     import zipfile
     if not os.path.exists("rs_knowledge_db") and os.path.exists("rs_knowledge_db.zip"):
