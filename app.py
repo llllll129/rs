@@ -40,7 +40,13 @@ API_KEY = "sk-8c8010eb5e9541b5a9db0c6df557fa7c"
 
 @st.cache_resource
 def init():
-    model = SentenceTransformer("shibing624/text2vec-base-chinese")
+        model = SentenceTransformer("shibing624/text2vec-base-chinese")
+    
+    import zipfile
+    if not os.path.exists("rs_knowledge_db") and os.path.exists("rs_knowledge_db.zip"):
+        with zipfile.ZipFile("rs_knowledge_db.zip", "r") as zf:
+            zf.extractall(".")
+    
     chroma_client = PersistentClient(path="rs_knowledge_db")
     collection = chroma_client.get_collection("rs_course")
     llm = OpenAI(api_key=API_KEY, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
