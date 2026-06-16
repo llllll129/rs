@@ -23,8 +23,7 @@ STUDY_LOG_FILE = "study_progress.json"
 CLASS_QA_FILE = "class_qa.json"
 UPLOAD_DIR = "uploads"
 
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 st.markdown("""
 <style>
