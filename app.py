@@ -506,6 +506,16 @@ if role == "👨‍🎓 学生端":
                 if c["chapter"] == sel:
                     with st.expander(f"📁 {c['title']}"):
                         if c.get("is_video"): st.video(c.get("file_path",""))
+                        elif c.get("is_image"):
+                            if os.path.exists(c.get("file_path","")): st.image(c.get("file_path",""))
+                        elif c.get("is_doc"):
+                            if c.get("file_path","").endswith(('.docx','.doc')):
+                                try:
+                                    from docx import Document
+                                    doc = Document(c.get("file_path",""))
+                                    st.markdown("\n".join([p.text for p in doc.paragraphs])[:5000])
+                                except: st.markdown(c.get("content",""))
+                            else: st.markdown(c.get("content",""))
                         else: st.markdown(c.get("content",""))
 
     elif active == 5:
@@ -928,13 +938,21 @@ elif role == "👩‍🏫 教师端":
     with tabs[4]:
         st.subheader("🔬 ENVI 实例上传")
         sel = st.selectbox("章节：", all_chapters, key="case_ch")
-        if st.button("📤 上传", key="upload_case_btn") and (ct := st.text_input("标题", key="case_title")) and (ud := st.file_uploader("上传文档（.txt）或视频（mp4/avi/mov）", type=["txt","mp4","avi","mov"], key="case_doc")):
+            if st.button("📤 上传", key="upload_case_btn") and (ct := st.text_input("标题", key="case_title")) and (ud := st.file_uploader("上传文档/图片/视频", type=["txt","pdf","docx","doc","png","jpg","jpeg","mp4","avi","mov"], key="case_doc")):
             ts = datetime.now().strftime("%Y%m%d_%H%M%S"); fp = os.path.join(UPLOAD_DIR, f"case_{ts}_{ud.name}")
             with open(fp, "wb") as f: f.write(ud.getbuffer())
-            is_vid = ud.name.lower().endswith(('.mp4','.avi','.mov')); cnt = "" if is_vid else ud.read().decode("utf-8")
+            is_vid = ud.name.lower().endswith(('.mp4','.avi','.mov'))
+            is_img = ud.name.lower().endswith(('.png','.jpg','.jpeg'))
+            is_doc = ud.name.lower().endswith(('.docx','.doc','.txt'))
+            cnt = ""
+            if is_doc:
+                if ud.name.endswith('.txt'):
+                    cnt = ud.read().decode("utf-8")
+                else:
+                    cnt = f"文件已保存：{fp}"
             cases = load_json(CASE_FILE)
             if not isinstance(cases, list): cases = []
-            cases.append({"chapter":sel,"title":ct,"content":cnt,"file_path":fp,"is_video":is_vid,"upload_time":datetime.now().strftime("%Y-%m-%d %H:%M")})
+                        cases.append({"chapter":sel,"title":ct,"content":cnt,"file_path":fp,"is_video":is_vid,"is_image":is_img,"is_doc":is_doc,"upload_time":datetime.now().strftime("%Y-%m-%d %H:%M")})
             save_json(cases, CASE_FILE); st.success("✅ 已上传"); st.rerun()
 
     with tabs[5]:
