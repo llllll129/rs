@@ -555,7 +555,7 @@ elif role == "👩‍🏫 教师端":
         st.subheader("📚 章节结构管理")
         structure = load_json(CHAPTER_STRUCTURE_FILE)
         built = list(structure.keys())
-                col_ch, col_del = st.columns([4, 1])
+        col_ch, col_del = st.columns([4, 1])
         with col_ch:
         sel_ch = st.selectbox("选择章节：", built + ["➕ 新建章节"], key="struct_ch")
         with col_del:
