@@ -952,7 +952,7 @@ elif role == "👩‍🏫 教师端":
                     cnt = f"文件已保存：{fp}"
             cases = load_json(CASE_FILE)
             if not isinstance(cases, list): cases = []
-                        cases.append({"chapter":sel,"title":ct,"content":cnt,"file_path":fp,"is_video":is_vid,"is_image":is_img,"is_doc":is_doc,"upload_time":datetime.now().strftime("%Y-%m-%d %H:%M")})
+            cases.append({"chapter":sel,"title":ct,"content":cnt,"file_path":fp,"is_video":is_vid,"is_image":is_img,"is_doc":is_doc,"upload_time":datetime.now().strftime("%Y-%m-%d %H:%M")})
             save_json(cases, CASE_FILE); st.success("✅ 已上传"); st.rerun()
 
     with tabs[5]:
