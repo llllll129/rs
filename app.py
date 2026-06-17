@@ -559,7 +559,7 @@ elif role == "👩‍🏫 教师端":
         if sel_ch == "➕ 新建章节":
             remaining = [c for c in all_chapters if c not in built]
             if remaining:
-                new_ch = st.selectbox("新建章节：", remaining, key="new_ch")
+                new_ch = st.selectbox("选择未创建的章节：", remaining, key="new_ch")
             else:
                 new_ch = st.text_input("所有章节已创建，手动输入新章节名：", key="manual_new_ch")
             if st.button("✅ 创建章节", key="create_ch_btn") and new_ch:
