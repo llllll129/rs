@@ -98,9 +98,13 @@ model, collection, llm = init()
 
 
 def get_all_chapters():
+    structure = load_json(CHAPTER_STRUCTURE_FILE)
+    if structure:
+        return sorted(structure.keys())
     results = collection.get()
     chapters = set()
-    for meta in results["metadatas"]: chapters.add(meta.get("chapter", "未知"))
+    for meta in results["metadatas"]:
+        chapters.add(meta.get("chapter", "未知"))
     return sorted(chapters)
 
 
