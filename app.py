@@ -98,12 +98,11 @@ model, collection, llm = init()
 
 
 def get_all_chapters():
-    chapters = set()
-    # 从知识库读取
     results = collection.get()
+    chapters = set()
     for meta in results["metadatas"]:
         chapters.add(meta.get("chapter", "未知"))
-    # 从 chapter_structure.json 补充
+    # 补充 chapter_structure.json 里的
     structure = load_json(CHAPTER_STRUCTURE_FILE)
     if structure:
         chapters.update(structure.keys())
@@ -558,7 +557,11 @@ elif role == "👩‍🏫 教师端":
         built = list(structure.keys())
         sel_ch = st.selectbox("选择章节：", built + ["➕ 新建章节"], key="struct_ch")
         if sel_ch == "➕ 新建章节":
-            new_ch = st.selectbox("新建章节：", [c for c in all_chapters if c not in built], key="new_ch")
+            remaining = [c for c in all_chapters if c not in built]
+            if remaining:
+                new_ch = st.selectbox("新建章节：", remaining, key="new_ch")
+            else:
+                new_ch = st.text_input("所有章节已创建，手动输入新章节名：", key="manual_new_ch")
             if st.button("✅ 创建章节", key="create_ch_btn") and new_ch:
                 structure[new_ch] = {"framework_image": "", "sections": []}
                 save_json(structure, CHAPTER_STRUCTURE_FILE); st.success(f"✅ 章节「{new_ch}」已创建"); st.rerun()
