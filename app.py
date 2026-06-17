@@ -98,10 +98,15 @@ model, collection, llm = init()
 
 
 def get_all_chapters():
-    results = collection.get()
     chapters = set()
+    # 从知识库读取
+    results = collection.get()
     for meta in results["metadatas"]:
         chapters.add(meta.get("chapter", "未知"))
+    # 从 chapter_structure.json 补充
+    structure = load_json(CHAPTER_STRUCTURE_FILE)
+    if structure:
+        chapters.update(structure.keys())
     return sorted(chapters)
 
 
