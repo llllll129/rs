@@ -52,7 +52,9 @@ def init():
         with zipfile.ZipFile("rs_knowledge_db.zip", "r") as zf:
             zf.extractall(".")
 
-    chroma_client = PersistentClient(path="rs_knowledge_db")
+        # 用本地zip解压的知识库
+    import chromadb
+    chroma_client = chromadb.PersistentClient(path="rs_knowledge_db")
     collection = chroma_client.get_collection("rs_course")
     llm = OpenAI(api_key=API_KEY, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
 
