@@ -557,7 +557,7 @@ elif role == "👩‍🏫 教师端":
         built = list(structure.keys())
         col_ch, col_del = st.columns([4, 1])
         with col_ch:
-        sel_ch = st.selectbox("选择章节：", built + ["➕ 新建章节"], key="struct_ch")
+            sel_ch = st.selectbox("选择章节：", built + ["➕ 新建章节"], key="struct_ch")
         with col_del:
             if sel_ch != "➕ 新建章节" and st.button("🗑️ 删除本章", key="del_chapter"):
                 if sel_ch in structure:
