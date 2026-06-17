@@ -35,54 +35,48 @@ API_KEY = "sk-8c8010eb5e9541b5a9db0c6df557fa7c"
 
 @st.cache_resource
 def init():
-    import sqlite3
     import pickle
     import zipfile
+    import base64
 
     # 解压知识库
-    if not os.path.exists("rs_knowledge_db.sqlite") and os.path.exists("rs_knowledge_db.zip"):
+    if not os.path.exists("rs_knowledge_db.json") and os.path.exists("rs_knowledge_db.zip"):
         with zipfile.ZipFile("rs_knowledge_db.zip", "r") as zf:
             zf.extractall(".")
 
-    # 用 SQLite 加载知识库
-    conn = sqlite3.connect("rs_knowledge_db.sqlite")
-    cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS vectors (id TEXT PRIMARY KEY, embedding BLOB, metadata TEXT, document TEXT)")
-    conn.commit()
+    # 加载 JSON 格式知识库
+    if os.path.exists("rs_knowledge_db.json"):
+        with open("rs_knowledge_db.json", "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+    else:
+        raw_data = {"ids": [], "embeddings": [], "metadatas": [], "documents": []}
 
-    class SQLiteCollection:
+    class JSONCollection:
+        def __init__(self, data):
+            self.data = data
+
         def get(self):
-            cursor.execute("SELECT metadata FROM vectors")
-            rows = cursor.fetchall()
-            metadatas = []
-            for row in rows:
-                try: metadatas.append(json.loads(row[0]))
-                except: metadatas.append({"chapter": "未知"})
-            return {"metadatas": metadatas}
+            return {"metadatas": self.data["metadatas"]}
 
         def query(self, query_embeddings, n_results=20):
             import numpy as np
-            cursor.execute("SELECT id, embedding, metadata, document FROM vectors")
-            rows = cursor.fetchall()
             results = {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
             query_vec = np.array(query_embeddings[0])
             scored = []
-            for row in rows:
-                emb = pickle.loads(row[1])
+            for i, emb_b64 in enumerate(self.data["embeddings"]):
+                emb = np.frombuffer(base64.b64decode(emb_b64), dtype=np.float32)
                 similarity = np.dot(query_vec, emb) / (np.linalg.norm(query_vec) * np.linalg.norm(emb) + 1e-10)
-                scored.append((similarity, row[0], row[3], row[2]))
+                scored.append((similarity, i))
             scored.sort(key=lambda x: x[0], reverse=True)
-            for sim, id_, doc, meta in scored[:n_results]:
-                results["ids"][0].append(id_)
-                results["documents"][0].append(doc)
-                try: results["metadatas"][0].append(json.loads(meta))
-                except: results["metadatas"][0].append({"chapter": "未知"})
+            for sim, idx in scored[:n_results]:
+                results["ids"][0].append(self.data["ids"][idx])
+                results["documents"][0].append(self.data["documents"][idx])
+                results["metadatas"][0].append(self.data["metadatas"][idx])
                 results["distances"][0].append(1 - sim)
             return results
 
-    collection = SQLiteCollection()
+    collection = JSONCollection(raw_data)
 
-    # 阿里云嵌入模型
     class AliyunEmbedding:
         def encode(self, texts):
             if isinstance(texts, str): texts = [texts]
