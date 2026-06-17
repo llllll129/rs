@@ -5,7 +5,6 @@ import re
 import numpy as np
 from datetime import datetime
 import streamlit as st
-from chromadb import PersistentClient
 from openai import OpenAI
 
 st.set_page_config(page_title="遥感课程智能助教", page_icon="🛰️", layout="wide")
@@ -36,6 +35,54 @@ API_KEY = "sk-8c8010eb5e9541b5a9db0c6df557fa7c"
 
 @st.cache_resource
 def init():
+    import sqlite3
+    import pickle
+    import zipfile
+
+    # 解压知识库
+    if not os.path.exists("rs_knowledge_db.sqlite") and os.path.exists("rs_knowledge_db.zip"):
+        with zipfile.ZipFile("rs_knowledge_db.zip", "r") as zf:
+            zf.extractall(".")
+
+    # 用 SQLite 加载知识库
+    conn = sqlite3.connect("rs_knowledge_db.sqlite")
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS vectors (id TEXT PRIMARY KEY, embedding BLOB, metadata TEXT, document TEXT)")
+    conn.commit()
+
+    class SQLiteCollection:
+        def get(self):
+            cursor.execute("SELECT metadata FROM vectors")
+            rows = cursor.fetchall()
+            metadatas = []
+            for row in rows:
+                try: metadatas.append(json.loads(row[0]))
+                except: metadatas.append({"chapter": "未知"})
+            return {"metadatas": metadatas}
+
+        def query(self, query_embeddings, n_results=20):
+            import numpy as np
+            cursor.execute("SELECT id, embedding, metadata, document FROM vectors")
+            rows = cursor.fetchall()
+            results = {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+            query_vec = np.array(query_embeddings[0])
+            scored = []
+            for row in rows:
+                emb = pickle.loads(row[1])
+                similarity = np.dot(query_vec, emb) / (np.linalg.norm(query_vec) * np.linalg.norm(emb) + 1e-10)
+                scored.append((similarity, row[0], row[3], row[2]))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for sim, id_, doc, meta in scored[:n_results]:
+                results["ids"][0].append(id_)
+                results["documents"][0].append(doc)
+                try: results["metadatas"][0].append(json.loads(meta))
+                except: results["metadatas"][0].append({"chapter": "未知"})
+                results["distances"][0].append(1 - sim)
+            return results
+
+    collection = SQLiteCollection()
+
+    # 阿里云嵌入模型
     class AliyunEmbedding:
         def encode(self, texts):
             if isinstance(texts, str): texts = [texts]
@@ -46,16 +93,6 @@ def init():
             return np.array(embeddings)
 
     model = AliyunEmbedding()
-
-    import zipfile
-    if not os.path.exists("rs_knowledge_db") and os.path.exists("rs_knowledge_db.zip"):
-        with zipfile.ZipFile("rs_knowledge_db.zip", "r") as zf:
-            zf.extractall(".")
-
-        # 用本地zip解压的知识库
-    import chromadb
-    chroma_client = chromadb.PersistentClient(path="rs_knowledge_db")
-    collection = chroma_client.get_collection("rs_course")
     llm = OpenAI(api_key=API_KEY, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
 
     global llm_client
