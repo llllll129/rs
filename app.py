@@ -938,7 +938,7 @@ elif role == "👩‍🏫 教师端":
     with tabs[4]:
         st.subheader("🔬 ENVI 实例上传")
         sel = st.selectbox("章节：", all_chapters, key="case_ch")
-            if st.button("📤 上传", key="upload_case_btn") and (ct := st.text_input("标题", key="case_title")) and (ud := st.file_uploader("上传文档/图片/视频", type=["txt","pdf","docx","doc","png","jpg","jpeg","mp4","avi","mov"], key="case_doc")):
+         if st.button("📤 上传", key="upload_case_btn") and (ct := st.text_input("标题", key="case_title")) and (ud := st.file_uploader("上传文档/图片/视频", type=["txt","pdf","docx","doc","png","jpg","jpeg","mp4","avi","mov"], key="case_doc")):
             ts = datetime.now().strftime("%Y%m%d_%H%M%S"); fp = os.path.join(UPLOAD_DIR, f"case_{ts}_{ud.name}")
             with open(fp, "wb") as f: f.write(ud.getbuffer())
             is_vid = ud.name.lower().endswith(('.mp4','.avi','.mov'))
