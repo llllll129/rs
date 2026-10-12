@@ -31,7 +31,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-API_KEY = "sk-8c8010eb5e9541b5a9db0c6df557fa7c"
+API_KEY = "d74237cd671a4c68aae9f96d9d46b07f.9j5gCdE1xriLAA0P"
 
 @st.cache_resource
 def init():
@@ -87,7 +87,7 @@ def init():
             return np.array(embeddings)
 
     model = AliyunEmbedding()
-    llm = OpenAI(api_key=API_KEY, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+    llm = OpenAI(api_key=API_KEY, base_url="https://open.bigmodel.cn/api/paas/v4")
 
     global llm_client
     llm_client = OpenAI(api_key=API_KEY, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
@@ -146,7 +146,7 @@ def search_and_format_textbook(keywords, chapter_filter=None, n_results=4):
 
 
 def call_llm(system_prompt, user_content, max_tokens=800):
-    response = llm.chat.completions.create(model="qwen-turbo", messages=[
+    response = llm.chat.completions.create(model="glm-4.7-flash", messages=[
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content}
     ], temperature=0.3, max_tokens=max_tokens)
