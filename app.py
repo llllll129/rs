@@ -55,12 +55,10 @@ def init():
     import zipfile
     import base64
 
-    # 解压知识库
     if not os.path.exists("rs_knowledge_db.json") and os.path.exists("rs_knowledge_db.zip"):
         with zipfile.ZipFile("rs_knowledge_db.zip", "r") as zf:
             zf.extractall(".")
 
-    # 加载 JSON 格式知识库
     if os.path.exists("rs_knowledge_db.json"):
         with open("rs_knowledge_db.json", "r", encoding="utf-8") as f:
             raw_data = json.load(f)
@@ -92,17 +90,21 @@ def init():
 
     collection = JSONCollection(raw_data)
 
-    class AliyunEmbedding:
+    class ZhipuEmbedding:
         def encode(self, texts):
             if isinstance(texts, str):
                 texts = [texts]
             embeddings = []
             for text in texts:
-                resp = llm.embeddings.create(model="embedding-3", input=text)
-                embeddings.append(resp.data[0].embedding)
+                try:
+                    resp = llm.embeddings.create(model="embedding-3", input=text)
+                    embeddings.append(resp.data[0].embedding)
+                except Exception as e:
+                    st.error(f"Embedding 调用失败：{e}")
+                    raise
             return np.array(embeddings)
 
-    model = AliyunEmbedding()
+    model = ZhipuEmbedding()
 
     return model, collection, llm
 
@@ -130,9 +132,6 @@ def search_textbook(keywords, chapter_filter=None, n_results=3):
                 docs.append(doc)
             if len(docs) >= n_results:
                 break
-        if not docs:
-            results = collection.query(query_embeddings=embedding, n_results=n_results)
-            docs = [d for d, m in zip(results["documents"][0], results["metadatas"][0]) if len(d.strip()) > 50]
         return docs[:n_results]
     else:
         results = collection.query(query_embeddings=embedding, n_results=n_results)
@@ -141,6 +140,8 @@ def search_textbook(keywords, chapter_filter=None, n_results=3):
 
 def search_and_format_textbook(keywords, chapter_filter=None, n_results=4):
     docs = search_textbook(keywords, chapter_filter=chapter_filter, n_results=n_results)
+    if not docs:
+        return f"⚠️ 本章节未检索到与「{keywords}」相关的内容，请确认知识点名称或换个说法。"
     raw_text = "\n\n".join(docs)
     sp = f"""你是遥感课程教材编辑。请根据课本原文，解释【{keywords}】这个知识点。
 输出要求：
@@ -148,13 +149,9 @@ def search_and_format_textbook(keywords, chapter_filter=None, n_results=4):
 2. 列出核心要点（2-4条，用编号列出）
 3. 如果课本原文中涉及公式，请写出公式并解释每个符号的含义；如果没有公式，这部分直接省略，不要硬编
 4. 整体简洁清晰，严格基于课本原文，修正OCR导致的断行和错别字"""
-    try:
-        formatted = call_llm(sp, f"请根据以下课本原文解释【{keywords}】：\n{raw_text}", max_tokens=1200)
-        formatted = re.sub(r'^#{1,6}\s+', '', formatted, flags=re.MULTILINE)
-        return formatted
-    except:
-        cleaned = re.sub(r'^#{1,6}\s+', '', raw_text, flags=re.MULTILINE)
-        return cleaned
+    formatted = call_llm(sp, f"请根据以下课本原文解释【{keywords}】：\n{raw_text}", max_tokens=1200)
+    formatted = re.sub(r'^#{1,6}\s+', '', formatted, flags=re.MULTILINE)
+    return formatted
 
 
 def call_llm(system_prompt, user_content, max_tokens=800):
@@ -250,6 +247,7 @@ def analyze_logs_by_type(log_type):
                 if r.get("log_type") == log_type:
                     records.append(r)
     return records
+
 
 # ==================== 页面 ====================
 if "role" not in st.session_state:
@@ -1003,7 +1001,6 @@ elif role == "👩‍🏫 教师端":
                 if st.button("📤 发送", key=f"send_{i}") and (rp := st.text_area("回复：", key=f"reply_{i}")):
                     r["teacher_reply"] = rp; r["resolved"] = True
                     log_interaction("qa_reply", {"original_ts":r["timestamp"],"student_id":r["student_id"],"teacher_reply":rp}); st.success("✅"); st.rerun()
-
 
     with tabs[6]:
         st.subheader("📊 学情总览")
