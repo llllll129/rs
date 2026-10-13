@@ -6,6 +6,7 @@ import numpy as np
 from datetime import datetime
 import streamlit as st
 from openai import OpenAI
+from storage_service import upload_file, display_course_image, show_video, download_bytes
 
 st.set_page_config(page_title="遥感课程智能助教", page_icon="🛰️", layout="wide")
 
@@ -248,7 +249,6 @@ def analyze_logs_by_type(log_type):
                     records.append(r)
     return records
 
-
 # ==================== 页面 ====================
 if "role" not in st.session_state:
     st.session_state.role = "👨‍🎓 学生端"
@@ -326,8 +326,7 @@ if role == "👨‍🎓 学生端":
                 left_col, right_col = st.columns([1, 1])
                 with left_col:
                     if ch_data.get("framework_image"):
-                        try: st.image(ch_data["framework_image"], use_container_width=True)
-                        except: st.info("📊 框架图缺失")
+                        display_course_image(ch_data["framework_image"], use_container_width=True)
                     else: st.info("📊 暂无框架图")
                 with right_col:
                     if learned_count >= total: st.success("🎉 本章所有知识点已学习完毕！")
@@ -342,18 +341,15 @@ if role == "👨‍🎓 学生端":
                         st.markdown("##### 📖 课本原文")
                         st.text(kp["textbook_content"] or "暂无内容")
                         for img_path in kp.get("textbook_images", []):
-                            if img_path and os.path.exists(img_path):
-                                try: st.image(img_path, use_container_width=True)
-                                except: pass
+                            if img_path: display_course_image(img_path, use_container_width=True)
                         st.markdown('</div>', unsafe_allow_html=True)
                         if kp["selected_examples"]:
                             with st.expander("##### 🌰 生活实例"):
                                 for ex in kp["selected_examples"]:
                                     if isinstance(ex, dict):
                                         if ex.get("type") == "image" and ex.get("content"):
-                                            try: st.image(ex["content"])
-                                            except: st.caption("图片缺失")
-                                        elif ex.get("type") == "video" and ex.get("content"): st.video(ex["content"])
+                                            display_course_image(ex["content"])
+                                        elif ex.get("type") == "video" and ex.get("content"): show_video(ex["content"])
                                         elif ex.get("content"): st.info(ex["content"])
                                     elif ex: st.info(ex)
                         if kp.get("think_question"):
@@ -504,17 +500,22 @@ if role == "👨‍🎓 学生端":
                 if p["chapter"] == sel:
                     if p.get("is_file"):
                         with st.expander(f"📄 {p['title']}"):
-                            if os.path.exists(p.get('file_path', '')):
+                            try:
+                                data = download_bytes(p.get('file_path', ''))
                                 if p['title'].lower().endswith('.pdf'):
-                                    with open(p['file_path'], "rb") as f: st.download_button("📥 下载论文", f.read(), file_name=p['title'])
+                                    st.download_button("📥 下载论文", data, file_name=p['title'])
                                 elif p['title'].lower().endswith('.txt'):
-                                    with open(p['file_path'], "r", encoding="utf-8") as f: st.text_area("论文内容：", f.read(), height=300)
+                                    st.text_area("论文内容：", data.decode('utf-8', errors='ignore'), height=300)
                                 elif p['title'].lower().endswith(('.docx', '.doc')):
                                     try:
                                         from docx import Document
-                                        doc = Document(p['file_path']); st.text_area("论文内容：", "\n".join([para.text for para in doc.paragraphs])[:5000], height=300)
-                                    except: pass
-                            else: st.caption("文件已失效")
+                                        import io
+                                        doc = Document(io.BytesIO(data))
+                                        st.text_area("论文内容：", "\n".join([para.text for para in doc.paragraphs])[:5000], height=300)
+                                    except:
+                                        st.download_button("📥 下载论文", data, file_name=p['title'])
+                            except Exception as e:
+                                st.caption(f"文件不可用：{e}")
                     else:
                         with st.expander(f"📄 {p['title']}"): st.write(f"**作者**：{p.get('author','')}，**摘要**：{p.get('abstract','')}")
 
@@ -527,14 +528,15 @@ if role == "👨‍🎓 学生端":
             for c in cases:
                 if c["chapter"] == sel:
                     with st.expander(f"📁 {c['title']}"):
-                        if c.get("is_video"): st.video(c.get("file_path",""))
-                        elif c.get("is_image"):
-                            if os.path.exists(c.get("file_path","")): st.image(c.get("file_path",""))
+                        if c.get("is_video"): show_video(c.get("file_path",""))
+                        elif c.get("is_image"): display_course_image(c.get("file_path",""))
                         elif c.get("is_doc"):
-                            if c.get("file_path","").endswith(('.docx','.doc')):
+                            if str(c.get("file_path","")).endswith(('.docx','.doc')):
                                 try:
                                     from docx import Document
-                                    doc = Document(c.get("file_path",""))
+                                    import io
+                                    data = download_bytes(c.get("file_path",""))
+                                    doc = Document(io.BytesIO(data))
                                     st.markdown("\n".join([p.text for p in doc.paragraphs])[:5000])
                                 except: st.markdown(c.get("content",""))
                             else: st.markdown(c.get("content",""))
@@ -547,13 +549,14 @@ if role == "👨‍🎓 学生端":
         if st.button("📤 提交") and q:
             sp = None
             if uf:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S"); sp = os.path.join(UPLOAD_DIR, f"{student_id}_{ts}_{uf.name}")
-                with open(sp, "wb") as f: f.write(uf.getbuffer())
+                try:
+                    sp = upload_file(uf, folder="student-uploads")
+                except Exception as e:
+                    st.error(f"上传失败：{e}"); sp = None
             ctx = "\n".join(search_textbook(q, chapter_filter=sel_ch))
             ans = call_llm("你是遥感助教。根据课本回答。末尾标注【问题已解决】或【需要老师查看】", f"【课本】\n{ctx}\n\n【问题】\n{q}")
             log_interaction("qa", {"student_id":student_id,"student_name":student_name,"chapter":sel_ch,"question":q,"answer":ans,"screenshot":sp or "","needs_teacher":"需要老师" in ans,"resolved":not ("需要老师" in ans)})
             st.write(ans)
-
 
 # ==================== 教师端 ====================
 elif role == "👩‍🏫 教师端":
@@ -600,13 +603,16 @@ elif role == "👩‍🏫 教师端":
 
         st.markdown("### 📊 本章框架图")
         if ch_data.get("framework_image"):
-            try: st.image(ch_data["framework_image"], width=500)
-            except: st.info("📊 框架图缺失")
+            display_course_image(ch_data["framework_image"], width=500)
         uploaded_img = st.file_uploader("上传框架图（图片或Word）", type=["png","jpg","jpeg","docx"], key="fw_upload")
         if uploaded_img:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S"); img_path = os.path.join(UPLOAD_DIR, f"fw_{ts}_{uploaded_img.name}")
-            with open(img_path, "wb") as f: f.write(uploaded_img.getbuffer())
-            ch_data["framework_image"] = img_path; save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 框架图已上传"); st.rerun()
+            try:
+                file_ref = upload_file(uploaded_img, folder="framework-images")
+                ch_data["framework_image"] = file_ref
+                save_json(structure, CHAPTER_STRUCTURE_FILE)
+                st.success("✅ 框架图已上传"); st.rerun()
+            except Exception as e:
+                st.error(f"上传失败：{e}")
 
         st.markdown("---"); st.markdown("### 📑 小节管理")
         sections = ch_data.get("sections", [])
@@ -639,8 +645,11 @@ elif role == "👩‍🏫 教师端":
                 if tb_multi and not st.session_state.get(f"tb_done_{i}", False):
                     st.session_state[f"tb_done_{i}"] = True
                     for uf in tb_multi:
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f"); ip = os.path.join(UPLOAD_DIR, f"tbimg_{ts}_{uf.name}")
-                        with open(ip, "wb") as f: f.write(uf.getbuffer()); st.session_state[f"new_kp_tb_img_list_{i}"].append(ip)
+                        try:
+                            ref = upload_file(uf, folder="textbook-images")
+                            st.session_state[f"new_kp_tb_img_list_{i}"].append(ref)
+                        except Exception as e:
+                            st.error(f"上传失败：{e}")
                     st.rerun()
                 tb_list = st.session_state[f"new_kp_tb_img_list_{i}"]
                 if tb_list:
@@ -648,10 +657,8 @@ elif role == "👩‍🏫 教师端":
                     cols = st.columns(4)
                     for idx, p in enumerate(tb_list):
                         with cols[idx % 4]:
-                            if os.path.exists(p):
-                                try: st.image(p, width=100)
-                                except: st.caption("图片已损坏")
-                                if st.button("🗑️", key=f"dtb_{i}_{idx}"): st.session_state[f"new_kp_tb_img_list_{i}"].pop(idx); st.rerun()
+                            display_course_image(p, width=100)
+                            if st.button("🗑️", key=f"dtb_{i}_{idx}"): st.session_state[f"new_kp_tb_img_list_{i}"].pop(idx); st.rerun()
 
                 st.markdown("##### 🤔 思考题")
                 if f"new_think_{i}" not in st.session_state: st.session_state[f"new_think_{i}"] = ""
@@ -669,8 +676,11 @@ elif role == "👩‍🏫 教师端":
                 if img_multi and not st.session_state.get(f"img_done_{i}", False):
                     st.session_state[f"img_done_{i}"] = True
                     for uf in img_multi:
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f"); ip = os.path.join(UPLOAD_DIR, f"ex_{ts}_{uf.name}")
-                        with open(ip, "wb") as f: f.write(uf.getbuffer()); st.session_state[f"new_kp_img_list_{i}"].append(ip)
+                        try:
+                            ref = upload_file(uf, folder="example-images")
+                            st.session_state[f"new_kp_img_list_{i}"].append(ref)
+                        except Exception as e:
+                            st.error(f"上传失败：{e}")
                     st.rerun()
                 img_list = st.session_state[f"new_kp_img_list_{i}"]
                 if img_list:
@@ -678,17 +688,18 @@ elif role == "👩‍🏫 教师端":
                     cols = st.columns(4)
                     for idx, p in enumerate(img_list):
                         with cols[idx % 4]:
-                            if os.path.exists(p):
-                                try: st.image(p, width=100)
-                                except: st.caption("图片已损坏")
-                                if st.button("🗑️", key=f"di_{i}_{idx}"): st.session_state[f"new_kp_img_list_{i}"].pop(idx); st.rerun()
+                            display_course_image(p, width=100)
+                            if st.button("🗑️", key=f"di_{i}_{idx}"): st.session_state[f"new_kp_img_list_{i}"].pop(idx); st.rerun()
 
                 col_vid = st.columns([1])[0]
                 with col_vid: uploaded_video_ex = st.file_uploader("🎬 视频（可选）：", type=["mp4","avi","mov"], key=f"new_kp_vid_{i}")
                 video_path_ex = ""
                 if uploaded_video_ex is not None:
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S"); video_path_ex = os.path.join(UPLOAD_DIR, f"ex_v_{ts}_{uploaded_video_ex.name}")
-                    with open(video_path_ex, "wb") as f: f.write(uploaded_video_ex.getbuffer()); st.success("✅ 视频已上传")
+                    try:
+                        video_path_ex = upload_file(uploaded_video_ex, folder="videos")
+                        st.success("✅ 视频已上传")
+                    except Exception as e:
+                        st.error(f"上传失败：{e}")
 
                 if st.button(f"✅ 确认添加知识点", key=f"new_kp_confirm_{i}", type="primary"):
                     examples = []
@@ -725,16 +736,17 @@ elif role == "👩‍🏫 教师端":
                             cols = st.columns(4)
                             for idx, img_path in enumerate(tb_images):
                                 with cols[idx % 4]:
-                                    if os.path.exists(img_path):
-                                        try: st.image(img_path, width=100)
-                                        except: st.caption("图片已损坏")
-                                        if st.button("🗑️", key=f"del_edit_tb_img_{i}_{j}_{idx}"): tb_images.pop(idx); kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
+                                    display_course_image(img_path, width=100)
+                                    if st.button("🗑️", key=f"del_edit_tb_img_{i}_{j}_{idx}"): tb_images.pop(idx); kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
                         edit_tb_multi = st.file_uploader("补充课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_tb_multi_{i}_{j}")
                         if edit_tb_multi and not st.session_state.get(f"edit_tb_done_{i}_{j}", False):
                             st.session_state[f"edit_tb_done_{i}_{j}"] = True
                             for uf in edit_tb_multi:
-                                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f"); ip = os.path.join(UPLOAD_DIR, f"tbimg_{ts}_{uf.name}")
-                                with open(ip, "wb") as f: f.write(uf.getbuffer()); tb_images.append(ip)
+                                try:
+                                    ref = upload_file(uf, folder="textbook-images")
+                                    tb_images.append(ref)
+                                except Exception as e:
+                                    st.error(f"上传失败：{e}")
                             kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
 
                         st.markdown("##### 🤔 思考题")
@@ -756,28 +768,32 @@ elif role == "👩‍🏫 教师端":
                             cols = st.columns(4)
                             for idx, e in enumerate(life_images):
                                 with cols[idx % 4]:
-                                    if os.path.exists(e['content']):
-                                        try: st.image(e['content'], width=100)
-                                        except: st.caption("图片已损坏")
-                                        if st.button("🗑️", key=f"del_edit_life_img_{i}_{j}_{idx}"): current_examples.remove(e); save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
+                                    display_course_image(e['content'], width=100)
+                                    if st.button("🗑️", key=f"del_edit_life_img_{i}_{j}_{idx}"): current_examples.remove(e); save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
 
                         for e in current_examples:
-                            if isinstance(e,dict) and e.get('type')=='video' and e.get('content') and os.path.exists(e['content']): st.video(e['content'])
+                            if isinstance(e,dict) and e.get('type')=='video' and e.get('content'): show_video(e['content'])
                         col_eimg, col_evid = st.columns([1,1])
                         with col_eimg:
                             edit_img_multi = st.file_uploader("补充图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_img_multi_{i}_{j}")
                             if edit_img_multi and not st.session_state.get(f"edit_img_done_{i}_{j}", False):
                                 st.session_state[f"edit_img_done_{i}_{j}"] = True
                                 for uf in edit_img_multi:
-                                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f"); ip = os.path.join(UPLOAD_DIR, f"edit_{ts}_{uf.name}")
-                                    with open(ip, "wb") as f: f.write(uf.getbuffer()); current_examples.append({"type":"image","content":ip})
+                                    try:
+                                        ref = upload_file(uf, folder="example-images")
+                                        current_examples.append({"type":"image","content":ref})
+                                    except Exception as e:
+                                        st.error(f"上传失败：{e}")
                                 save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
                         with col_evid:
                             edit_vid = st.file_uploader("补充视频：", type=["mp4","avi","mov"], key=f"edit_vid_{i}_{j}")
                             if edit_vid is not None:
-                                ts = datetime.now().strftime("%Y%m%d_%H%M%S"); vp = os.path.join(UPLOAD_DIR, f"edit_{ts}_{edit_vid.name}")
-                                with open(vp, "wb") as f: f.write(edit_vid.getbuffer()); current_examples.append({"type":"video","content":vp})
-                                save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 视频已添加")
+                                try:
+                                    vp = upload_file(edit_vid, folder="videos")
+                                    current_examples.append({"type":"video","content":vp})
+                                    save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 视频已添加")
+                                except Exception as e:
+                                    st.error(f"上传失败：{e}")
 
                         col_save, col_del = st.columns([2,1])
                         with col_save:
@@ -796,7 +812,6 @@ elif role == "👩‍🏫 教师端":
 
             if st.button(f"🗑️ 删除本节「{sec['title']}」", key=f"del_sec_{i}"):
                 sections.pop(i); ch_data["sections"] = sections; save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 小节已删除"); st.rerun()
-
     with tabs[1]:
         st.subheader("📋 课堂问答管理")
         class_qa = load_json(CLASS_QA_FILE)
@@ -945,14 +960,14 @@ elif role == "👩‍🏫 教师端":
                 papers = load_json(PAPER_FILE)
                 if not isinstance(papers, list): papers = []
                 existing_names = {p.get("title","") for p in papers if p.get("chapter")==sel}
-                paper_dir = os.path.join(UPLOAD_DIR, "papers")
-                os.makedirs(paper_dir, exist_ok=True)
                 added = 0
                 for up in uploaded_papers:
                     if up.name in existing_names: continue
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S"); file_path = os.path.join(paper_dir, f"{ts}_{up.name}")
-                    with open(file_path, "wb") as f: f.write(up.getbuffer())
-                    papers.append({"chapter":sel,"title":up.name,"author":"","abstract":"","file_path":file_path,"is_file":True}); added += 1
+                    try:
+                        file_ref = upload_file(up, folder="papers")
+                        papers.append({"chapter":sel,"title":up.name,"author":"","abstract":"","file_path":file_ref,"is_file":True}); added += 1
+                    except Exception as e:
+                        st.error(f"上传失败：{e}")
                 save_json(papers, PAPER_FILE)
                 if added > 0: st.success(f"✅ 已上传 {added} 篇论文"); st.rerun()
         papers = load_json(PAPER_FILE)
@@ -962,8 +977,11 @@ elif role == "👩‍🏫 教师端":
                 if p.get("chapter") != sel: continue
                 if p.get("is_file"):
                     with st.expander(f"📄 {p['title']}"):
-                        if os.path.exists(p.get('file_path','')):
-                            with open(p['file_path'],"rb") as f: st.download_button("📥 下载论文", f.read(), file_name=p['title'], key=f"dl_paper_{idx}")
+                        try:
+                            data = download_bytes(p.get('file_path',''))
+                            st.download_button("📥 下载论文", data, file_name=p['title'], key=f"dl_paper_{idx}")
+                        except Exception as e:
+                            st.caption(f"文件不可用：{e}")
                         if st.button("🗑️ 删除", key=f"del_paper_{idx}"): papers.pop(idx); save_json(papers, PAPER_FILE); st.rerun()
                 else:
                     with st.expander(f"📄 {p['title']}"):
@@ -974,15 +992,17 @@ elif role == "👩‍🏫 教师端":
         st.subheader("🔬 ENVI 实例上传")
         sel = st.selectbox("章节：", all_chapters, key="case_ch")
         if st.button("📤 上传", key="upload_case_btn") and (ct := st.text_input("标题", key="case_title")) and (ud := st.file_uploader("上传文档/图片/视频", type=["txt","pdf","docx","doc","png","jpg","jpeg","mp4","avi","mov"], key="case_doc")):
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S"); fp = os.path.join(UPLOAD_DIR, f"case_{ts}_{ud.name}")
-            with open(fp, "wb") as f: f.write(ud.getbuffer())
+            try:
+                fp = upload_file(ud, folder="cases")
+            except Exception as e:
+                st.error(f"上传失败：{e}"); st.stop()
             is_vid = ud.name.lower().endswith(('.mp4','.avi','.mov'))
             is_img = ud.name.lower().endswith(('.png','.jpg','.jpeg'))
             is_doc = ud.name.lower().endswith(('.docx','.doc','.txt'))
             cnt = ""
             if is_doc:
                 if ud.name.endswith('.txt'):
-                    cnt = ud.read().decode("utf-8")
+                    cnt = ud.getvalue().decode('utf-8', errors='ignore')
                 else:
                     cnt = f"文件已保存：{fp}"
             cases = load_json(CASE_FILE)
@@ -997,7 +1017,7 @@ elif role == "👩‍🏫 教师端":
         for i, r in enumerate(unresolved):
             with st.expander(f"🔴 {r['student_name']} - {r['timestamp'][:19]}"):
                 st.write(r['question'])
-                if r.get("screenshot") and os.path.exists(r["screenshot"]): st.image(r["screenshot"])
+                if r.get("screenshot"): display_course_image(r["screenshot"])
                 if st.button("📤 发送", key=f"send_{i}") and (rp := st.text_area("回复：", key=f"reply_{i}")):
                     r["teacher_reply"] = rp; r["resolved"] = True
                     log_interaction("qa_reply", {"original_ts":r["timestamp"],"student_id":r["student_id"],"teacher_reply":rp}); st.success("✅"); st.rerun()
