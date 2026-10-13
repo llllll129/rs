@@ -9,7 +9,25 @@ from openai import OpenAI
 
 st.set_page_config(page_title="遥感课程智能助教", page_icon="🛰️", layout="wide")
 
-TEACHER_PASSWORD = "rs2026"
+
+def get_secret(section, key, default=None):
+    try:
+        return st.secrets[section][key]
+    except (KeyError, FileNotFoundError):
+        return os.getenv(f"{section.upper()}_{key.upper()}", default)
+
+
+API_KEY = get_secret("ai", "api_key")
+BASE_URL = get_secret("ai", "base_url", "https://open.bigmodel.cn/api/paas/v4")
+MODEL_NAME = get_secret("ai", "model", "glm-4.7-flash")
+TEACHER_PASSWORD = get_secret("auth", "teacher_password", "rs2026")
+
+if not API_KEY:
+    st.error("尚未配置 AI API 密钥，请联系管理员。")
+    st.stop()
+
+llm = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
 LOG_FILE = "learning_log.jsonl"
 QUIZ_FILE = "quiz_tasks.json"
 PAPER_FILE = "papers.json"
@@ -31,11 +49,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-API_KEY = "d74237cd671a4c68aae9f96d9d46b07f.9j5gCdE1xriLAA0P"
 
 @st.cache_resource
 def init():
-    import pickle
     import zipfile
     import base64
 
@@ -59,7 +75,6 @@ def init():
             return {"metadatas": self.data["metadatas"]}
 
         def query(self, query_embeddings, n_results=20):
-            import numpy as np
             results = {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
             query_vec = np.array(query_embeddings[0])
             scored = []
@@ -79,18 +94,15 @@ def init():
 
     class AliyunEmbedding:
         def encode(self, texts):
-            if isinstance(texts, str): texts = [texts]
+            if isinstance(texts, str):
+                texts = [texts]
             embeddings = []
             for text in texts:
-                resp = llm_client.embeddings.create(model="text-embedding-v2", input=text)
+                resp = llm.embeddings.create(model="embedding-3", input=text)
                 embeddings.append(resp.data[0].embedding)
             return np.array(embeddings)
 
     model = AliyunEmbedding()
-    llm = OpenAI(api_key=API_KEY, base_url="https://open.bigmodel.cn/api/paas/v4")
-
-    global llm_client
-    llm_client = OpenAI(api_key=API_KEY, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
 
     return model, collection, llm
 
@@ -102,7 +114,6 @@ def get_all_chapters():
     chapters = set()
     for meta in results["metadatas"]:
         chapters.add(meta.get("chapter", "未知"))
-    # 补充 chapter_structure.json 里的
     structure = load_json(CHAPTER_STRUCTURE_FILE)
     if structure:
         chapters.update(structure.keys())
@@ -117,7 +128,8 @@ def search_textbook(keywords, chapter_filter=None, n_results=3):
         for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
             if meta.get("chapter") == chapter_filter and len(doc.strip()) > 50:
                 docs.append(doc)
-            if len(docs) >= n_results: break
+            if len(docs) >= n_results:
+                break
         if not docs:
             results = collection.query(query_embeddings=embedding, n_results=n_results)
             docs = [d for d, m in zip(results["documents"][0], results["metadatas"][0]) if len(d.strip()) > 50]
@@ -146,10 +158,15 @@ def search_and_format_textbook(keywords, chapter_filter=None, n_results=4):
 
 
 def call_llm(system_prompt, user_content, max_tokens=800):
-    response = llm.chat.completions.create(model="glm-4.7-flash", messages=[
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content}
-    ], temperature=0.3, max_tokens=max_tokens)
+    response = llm.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ],
+        temperature=0.3,
+        max_tokens=max_tokens
+    )
     return response.choices[0].message.content
 
 
@@ -157,8 +174,10 @@ def load_json(path):
     if not os.path.exists(path):
         return {} if path in [STUDY_LOG_FILE, CHAPTER_STRUCTURE_FILE] else []
     with open(path, "r", encoding="utf-8") as f:
-        try: return json.load(f)
-        except: return {} if path in [STUDY_LOG_FILE, CHAPTER_STRUCTURE_FILE] else []
+        try:
+            return json.load(f)
+        except:
+            return {} if path in [STUDY_LOG_FILE, CHAPTER_STRUCTURE_FILE] else []
 
 
 def save_json(data, path):
@@ -206,8 +225,10 @@ def auto_grade_quiz(question, correct_answer, student_answer, q_type):
         score = 60
         for line in result.split("\n"):
             if "【得分】" in line:
-                try: score = int(line.split("【得分】")[1].split("分")[0].strip())
-                except: pass
+                try:
+                    score = int(line.split("【得分】")[1].split("分")[0].strip())
+                except:
+                    pass
         return score, result
 
 
@@ -219,13 +240,15 @@ def log_interaction(log_type, data):
 
 
 def analyze_logs_by_type(log_type):
-    if not os.path.exists(LOG_FILE): return []
+    if not os.path.exists(LOG_FILE):
+        return []
     records = []
     with open(LOG_FILE, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 r = json.loads(line)
-                if r.get("log_type") == log_type: records.append(r)
+                if r.get("log_type") == log_type:
+                    records.append(r)
     return records
 
 # ==================== 页面 ====================
