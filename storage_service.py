@@ -59,7 +59,7 @@ def display_course_image(file_ref, **kwargs):
     elif os.path.isfile(str(file_ref)):
         st.image(file_ref, **kwargs)
     else:
-        st.warning(f"文件不可用：{os.path.basename(str(file_ref))}")
+        pass
 
 
 def show_video(file_ref, **kwargs):
