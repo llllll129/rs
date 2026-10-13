@@ -3,3 +3,4 @@ openai
 numpy
 PyPDF2
 python-docx
+supabase
