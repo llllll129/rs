@@ -1,5 +1,5 @@
-streamlit
 starlette<0.47.0
+streamlit
 openai
 numpy
 PyPDF2
