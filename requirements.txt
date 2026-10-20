@@ -1,7 +1,4 @@
-starlette<0.47.0
 streamlit
 openai
 numpy
-PyPDF2
-python-docx
 requests
