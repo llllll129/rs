@@ -5,6 +5,7 @@ import re
 import numpy as np
 from datetime import datetime
 import streamlit as st
+st.write("Secrets 配置项：", list(st.secrets.keys()))
 from openai import OpenAI
 from storage_service import upload_file, display_course_image, show_video, download_bytes
 
