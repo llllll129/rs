@@ -27,6 +27,7 @@ def upload_file(uploaded_file, folder="images"):
         repo_resp = requests.get(
             repo_url, headers=headers, timeout=15
         )
+        st.info("正在连接 GitHub，检查仓库权限……")
         repo_resp.raise_for_status()
         branch = repo_resp.json()["default_branch"]
 
@@ -46,10 +47,12 @@ def upload_file(uploaded_file, folder="images"):
             "branch": branch
         }
 
+        st.info("已连接 GitHub，正在上传图片……")
         resp = requests.put(
             url, headers=headers, json=data, timeout=30
         )
         resp.raise_for_status()
+        st.success("GitHub 已接收图片")
 
         return (
             f"https://raw.githubusercontent.com/"
