@@ -622,13 +622,6 @@ elif role == "👩‍🏫 教师端":
             display_course_image(ch_data["framework_image"], width=500)
         uploaded_img = st.file_uploader("上传框架图（图片或Word）", type=["png","jpg","jpeg","docx"], key="fw_upload")
         if uploaded_img:
-            try:
-                file_ref = upload_file(uploaded_img, folder="framework-images")
-                ch_data["framework_image"] = file_ref
-                save_json(structure, CHAPTER_STRUCTURE_FILE)
-                st.success("✅ 框架图已上传"); st.rerun()
-            except Exception as e:
-                st.error(f"上传失败：{e}")
 
         st.markdown("---"); st.markdown("### 📑 小节管理")
         sections = ch_data.get("sections", [])
