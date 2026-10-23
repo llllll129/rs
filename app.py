@@ -144,7 +144,7 @@ def get_all_chapters():
     chapters = set()
     for meta in results["metadatas"]:
         chapters.add(meta.get("chapter", "未知"))
-    structure = load_json(CHAPTER_STRUCTURE_FILE)
+    structure, _ = load_json_from_github("chapter_structure.json")
     if structure:
         chapters.update(structure.keys())
     return sorted(chapters)
