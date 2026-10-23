@@ -8,15 +8,15 @@ st.write("storage_service 当前配置项：", list(st.secrets.keys()))
 
 
 def get_github_config():
-    keys = list(st.secrets.keys())
-
-    if "github_storage" not in keys:
+    try:
+        cfg = st.secrets["github_storage"]
+        token = cfg["token"]
+        repo = cfg["repo"].strip()
+        return token, repo
+    except Exception as e:
         raise RuntimeError(
-            f"配置读取失败，当前 Secrets 配置项：{keys}"
-        )
-
-    cfg = st.secrets["github_storage"]
-    return cfg["token"], cfg["repo"].strip()
+            f"读取 GitHub 配置失败：{type(e).__name__}: {e}"
+        ) from e
 
 def upload_file(uploaded_file, folder="images"):
     """上传文件到 GitHub，返回 raw 图片链接"""
