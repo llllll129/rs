@@ -306,6 +306,8 @@ if role == "👨‍🎓 学生端":
 
     if active == 0:
         structure = load_json(CHAPTER_STRUCTURE_FILE)
+        st.write("章节数量：", len(structure))
+        st.write("章节数据示例：", list(structure.items())[:1])
         if not structure: st.info("📭 老师暂未搭建章节结构")
         else:
             sel_ch = st.selectbox("📖 选择章节：", list(structure.keys()), key="ch_sel", label_visibility="collapsed")
