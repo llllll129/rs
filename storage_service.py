@@ -7,6 +7,14 @@ import streamlit as st
 
 
 def get_github_config():
+    keys = list(st.secrets.keys())
+
+    if "github_storage" not in keys:
+        raise RuntimeError(
+            f"当前 storage_service.py 读取不到配置；"
+            f"可见配置项：{keys}"
+        )
+
     cfg = st.secrets["github_storage"]
     return cfg["token"], cfg["repo"]
 
