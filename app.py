@@ -1,5 +1,6 @@
 # app.py
 import os
+from openai import OpenAI
 import json
 import re
 import numpy as np
