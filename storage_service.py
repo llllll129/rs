@@ -3,23 +3,32 @@ import base64
 import uuid
 import requests
 import streamlit as st
-st.write("storage_service 文件位置：", __file__)
-st.write("storage_service 当前配置项：", list(st.secrets.keys()))
+import os
+
+def show_secrets_debug(stage):
+    try:
+        keys = list(st.secrets.keys())
+        st.write(f"[调试] {stage}：{keys}")
+    except Exception as e:
+        st.write(f"[调试] {stage}：读取失败（{type(e).__name__}）")
 
 
 
 def get_github_config():
     try:
+        show_secrets_debug("读取 GitHub 配置前")
+
         cfg = st.secrets["github_storage"]
         token = cfg["token"]
         repo = cfg["repo"].strip()
         return token, repo
+
     except Exception as e:
-        # 只输出配置项名称，不输出任何密钥
         try:
             keys = list(st.secrets.keys())
         except Exception:
             keys = ["无法读取配置项"]
+
         raise RuntimeError(
             f"读取 GitHub 配置失败；"
             f"异常类型：{type(e).__name__}；"
@@ -29,7 +38,7 @@ def get_github_config():
 
 
 def upload_file(uploaded_file, folder="images"):
-    st.write("进入 upload_file，配置项：", list(st.secrets.keys()))
+    show_secrets_debug("进入 upload_file")
     st.write("当前运行文件：", __file__)
 
     token, repo = get_github_config()
