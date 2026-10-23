@@ -24,7 +24,11 @@ def github_request(method, path, **kwargs):
     response = requests.request(
         method, url, headers=headers, timeout=30, **kwargs
     )
-    response.raise_for_status()
+    if not response.ok:
+        raise RuntimeError(
+        f"GitHub API 请求失败：HTTP {response.status_code}；"
+        f"详情：{response.text[:500]}"
+    )
     return response.json()
 
 
