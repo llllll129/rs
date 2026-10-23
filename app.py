@@ -1,4 +1,3 @@
-# app.py
 import os
 from openai import OpenAI
 import json
