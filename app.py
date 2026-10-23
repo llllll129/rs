@@ -7,13 +7,26 @@ import numpy as np
 from datetime import datetime
 import streamlit as st
 
+st.set_page_config(
+    page_title="遥感课程智能助教",
+    page_icon="🛰️",
+    layout="wide"
+)
+
 st.write("app.py 可见的 Secrets：", list(st.secrets.keys()))
 
-from storage_service import upload_file, display_course_image, show_video, download_bytes
+from storage_service import (
+    upload_file,
+    display_course_image,
+    show_video,
+    download_bytes
+)
 
-st.write("storage_service 导入后，app.py 可见的 Secrets：", list(st.secrets.keys()))
+st.write(
+    "storage_service 导入后，app.py 可见的 Secrets：",
+    list(st.secrets.keys())
+)
 
-st.set_page_config(page_title="遥感课程智能助教", page_icon="🛰️", layout="wide")
 
 
 
