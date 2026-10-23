@@ -23,6 +23,7 @@ def get_upload_config():
             "请在 Streamlit Cloud 的 App settings → Secrets 中确认配置。"
         )
 
+
 st.write("app.py 当前配置项：", list(st.secrets.keys()))
 st.write("配置文件路径：", __file__)
 
@@ -36,7 +37,6 @@ from storage_service import (
 )
 
 
-
 def get_secret(section, key, default=None):
     try:
         return st.secrets[section][key]
@@ -45,7 +45,10 @@ def get_secret(section, key, default=None):
 
 
 API_KEY = get_secret("ai", "api_key")
-BASE_URL = get_secret("ai", "base_url", "https://open.bigmodel.cn/api/paas/v4")
+BASE_URL = get_secret(
+    "ai", "base_url",
+    "https://open.bigmodel.cn/api/paas/v4"
+)
 MODEL_NAME = get_secret("ai", "model", "glm-4.7-flash")
 TEACHER_PASSWORD = get_secret("auth", "teacher_password", "rs2026")
 
@@ -54,7 +57,6 @@ if not API_KEY:
     st.stop()
 
 llm = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-
 
 LOG_FILE = "learning_log.jsonl"
 QUIZ_FILE = "quiz_tasks.json"
