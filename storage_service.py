@@ -41,7 +41,7 @@ def upload_file(uploaded_file, folder="images", token=None, repo=None):
     repo_url = f"https://api.github.com/repos/{repo}"
     repo_resp = requests.get(repo_url, headers=headers, timeout=15)
     if not resp.ok:
-    raise RuntimeError(
+        raise RuntimeError(
         f"GitHub 上传失败，状态码：{resp.status_code}；"
         f"原因：{resp.text}"
     )
