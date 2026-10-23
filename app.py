@@ -12,8 +12,6 @@ st.set_page_config(
     page_icon="🛰️",
     layout="wide"
 )
-GITHUB_TOKEN = st.secrets["github_storage"]["token"]
-GITHUB_REPO = st.secrets["github_storage"]["repo"].strip()
 
 def get_upload_config():
     try:
