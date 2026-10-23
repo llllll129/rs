@@ -7,16 +7,15 @@ import streamlit as st
 
 
 def get_github_config():
-    try:
+    keys = list(st.secrets.keys())
+
+    if "github_storage" not in keys:
+        raise RuntimeError(
+            f"配置读取失败，当前 Secrets 配置项：{keys}"
+        )
+
     cfg = st.secrets["github_storage"]
-except KeyError:
-    raise RuntimeError(
-        f"storage_service 读取不到 github_storage，"
-        f"当前可见配置项：{list(st.secrets.keys())}"
-    )
-    token = cfg["token"]
-    repo = cfg["repo"].strip()
-    return token, repo
+    return cfg["token"], cfg["repo"].strip()
 
 def upload_file(uploaded_file, folder="images"):
     """上传文件到 GitHub，返回 raw 图片链接"""
