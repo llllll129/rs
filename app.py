@@ -673,8 +673,9 @@ elif role == "👩‍🏫 教师端":
 
         if uploaded_img:
             try:
-                token = st.secrets["github_token"]
-                repo = st.secrets["github_repo"].strip()
+                cfg = st.secrets["github_storage"]
+                token = cfg["token"]
+                repo = cfg["repo"].strip()
 
                 file_ref = upload_file(
                     uploaded_img,
