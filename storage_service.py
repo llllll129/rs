@@ -7,11 +7,10 @@ import streamlit as st
 
 
 def get_github_config():
-    keys = list(st.secrets.keys())
-    st.write("storage_service 读取时的 Secrets：", keys)
-
     cfg = st.secrets["github_storage"]
-    return cfg["token"], cfg["repo"]
+    token = cfg["token"]
+    repo = cfg["repo"].strip()
+    return token, repo
 
 def upload_file(uploaded_file, folder="images"):
     """上传文件到 GitHub，返回 raw 图片链接"""
