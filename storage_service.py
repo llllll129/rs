@@ -12,35 +12,57 @@ def get_github_config():
 
 
 def upload_file(uploaded_file, folder="images"):
-    """上传到 GitHub 仓库，并返回 raw 链接"""
+    """上传文件到 GitHub，返回 raw 图片链接"""
     token, repo = get_github_config()
-    ext = os.path.splitext(uploaded_file.name)[1].lower()
-    filename = f"{folder}/{uuid.uuid4().hex}{ext}"
-    
-    url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+
     headers = {
         "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json"
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
     }
-    
-    uploaded_file.seek(0)
-    content_b64 = base64.b64encode(uploaded_file.read()).decode("utf-8")
-    
-    data = {
-        "message": f"upload {filename}",
-        "content": content_b64
-    }
-    
+
     try:
-        resp = requests.put(url, headers=headers, json=data, timeout=15)
-        if resp.status_code in [200, 201]:
-            # 返回可以直接访问的 raw 链接
-            raw_url = f"https://raw.githubusercontent.com/{repo}/master/{filename}"
-            return raw_url
-        else:
-            raise Exception(f"GitHub API 报错：{resp.status_code} - {resp.text}")
+        # 获取仓库信息和默认分支
+        repo_url = f"https://api.github.com/repos/{repo}"
+        repo_resp = requests.get(
+            repo_url, headers=headers, timeout=15
+        )
+        repo_resp.raise_for_status()
+        branch = repo_resp.json()["default_branch"]
+
+        # 生成文件路径
+        ext = os.path.splitext(uploaded_file.name)[1].lower()
+        filename = f"{folder}/{uuid.uuid4().hex}{ext}"
+
+        uploaded_file.seek(0)
+        content_b64 = base64.b64encode(
+            uploaded_file.read()
+        ).decode("utf-8")
+
+        url = f"{repo_url}/contents/{filename}"
+        data = {
+            "message": f"upload {filename}",
+            "content": content_b64,
+            "branch": branch
+        }
+
+        resp = requests.put(
+            url, headers=headers, json=data, timeout=30
+        )
+        resp.raise_for_status()
+
+        return (
+            f"https://raw.githubusercontent.com/"
+            f"{repo}/{branch}/{filename}"
+        )
+
     except Exception as e:
-        raise Exception(f"上传失败：{str(e)}")
+        if isinstance(e, requests.HTTPError) and e.response is not None:
+            detail = e.response.text
+        else:
+            detail = str(e)
+
+        raise RuntimeError(f"GitHub 图片上传失败：{detail}") from e
 
 
 def download_file(file_ref):
