@@ -672,10 +672,7 @@ elif role == "👩‍🏫 教师端":
             key="fw_upload"
         )
 
-        if uploaded_img:
-            st.write("上传前配置项：", list(st.secrets.keys()))
-
-                   if uploaded_img:
+                if uploaded_img:
             try:
                 cfg = st.secrets["github_storage"]
                 token = cfg["token"]
