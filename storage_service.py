@@ -8,6 +8,9 @@ st.write("storage_service 当前配置项：", list(st.secrets.keys()))
 
 
 def get_github_config():
+    st.write("配置文件位置：", __file__)
+    st.write("当前可读取的配置项：", list(st.secrets.keys()))
+
     try:
         cfg = st.secrets["github_storage"]
         token = cfg["token"]
