@@ -116,15 +116,30 @@ def save_json_to_github(data, path="chapter_structure.json"):
 
 
 def download_file(file_ref):
+    import requests
+
+    if not isinstance(file_ref, str) or not file_ref.strip():
+        return None
+
+    file_ref = file_ref.strip()
+
+    if not file_ref.startswith(("https://", "http://")):
+        return None
+
     response = requests.get(file_ref, timeout=20)
     response.raise_for_status()
     return response.content
 
 
 def show_image(file_ref, **kwargs):
-    if file_ref:
-        st.image(download_file(file_ref), **kwargs)
+    import streamlit as st
 
+    image_data = download_file(file_ref)
+
+    if image_data is not None:
+        st.image(image_data, **kwargs)
+    else:
+        st.warning("这张图片还没有有效的网络地址，请重新上传。")
 
 def display_course_image(file_ref, **kwargs):
     if file_ref:
