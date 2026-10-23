@@ -12,7 +12,8 @@ st.set_page_config(
     page_icon="🛰️",
     layout="wide"
 )
-
+GITHUB_TOKEN = st.secrets["github_storage"]["token"]
+GITHUB_REPO = st.secrets["github_storage"]["repo"].strip()
 
 def get_upload_config():
     try:
@@ -674,14 +675,11 @@ elif role == "👩‍🏫 教师端":
 
         if uploaded_img:
             try:
-                token = st.secrets["github_token"]
-                repo = st.secrets["github_repo"].strip()
-
                 file_ref = upload_file(
                     uploaded_img,
                     folder="framework-images",
-                    token=token,
-                    repo=repo,
+                    token=GITHUB_TOKEN,
+                    repo=GITHUB_REPO,
                 )
 
                 ch_data["framework_image"] = file_ref
