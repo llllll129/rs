@@ -13,7 +13,10 @@ def show_secrets_debug(stage):
         st.write(f"[调试] {stage}：读取失败（{type(e).__name__}）")
 
 
-
+@st.cache_resource
+def get_github_config():
+    cfg = st.secrets["github_storage"]
+    return cfg["token"], cfg["repo"].strip()
 
 def upload_file(uploaded_file, folder="images", token=None, repo=None):
     import os
@@ -24,14 +27,7 @@ def upload_file(uploaded_file, folder="images", token=None, repo=None):
 
     # 兼容旧调用，但优先使用 app.py 传入的配置
     if not token or not repo:
-        try:
-            cfg = st.secrets["github_storage"]
-            token = token or cfg["token"]
-            repo = repo or cfg["repo"].strip()
-        except Exception as e:
-            raise RuntimeError(
-                f"无法读取 GitHub 配置：{type(e).__name__}: {e}"
-            ) from e
+        token, repo = get_github_config()
 
     headers = {
         "Authorization": f"Bearer {token}",
