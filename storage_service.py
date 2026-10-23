@@ -3,7 +3,8 @@ import base64
 import uuid
 import requests
 import streamlit as st
-
+st.write("storage_service 文件位置：", __file__)
+st.write("storage_service 当前配置项：", list(st.secrets.keys()))
 
 
 def get_github_config():
