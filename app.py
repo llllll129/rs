@@ -13,8 +13,16 @@ st.set_page_config(
     layout="wide"
 )
 
-GITHUB_TOKEN = st.secrets["github_storage"]["token"]
-GITHUB_REPO = st.secrets["github_storage"]["repo"].strip()
+
+def get_upload_config():
+    try:
+        cfg = st.secrets["github_storage"]
+        return cfg["token"], cfg["repo"].strip()
+    except KeyError:
+        raise RuntimeError(
+            "当前运行实例无法读取 github_storage 配置。"
+            "请在 Streamlit Cloud 的 App settings → Secrets 中确认配置。"
+        )
 
 st.write("app.py 当前配置项：", list(st.secrets.keys()))
 st.write("配置文件路径：", __file__)
@@ -667,15 +675,18 @@ elif role == "👩‍🏫 教师端":
         if uploaded_img:
             st.write("上传前配置项：", list(st.secrets.keys()))
 
+                   if uploaded_img:
             try:
+                cfg = st.secrets["github_storage"]
+                token = cfg["token"]
+                repo = cfg["repo"].strip()
+
                 file_ref = upload_file(
                     uploaded_img,
                     folder="framework-images",
-                    token=GITHUB_TOKEN,
-                    repo=GITHUB_REPO,
-                 )
-
-                st.write("上传后配置项：", list(st.secrets.keys()))
+                    token=token,
+                    repo=repo,
+                )
 
                 ch_data["framework_image"] = file_ref
                 save_json(structure, CHAPTER_STRUCTURE_FILE)
@@ -684,9 +695,9 @@ elif role == "👩‍🏫 教师端":
                 st.rerun()
 
             except Exception as e:
-                st.write("失败时配置项：", list(st.secrets.keys()))
                 st.error(f"上传失败：{e}")
 
+        
         st.markdown("---")
         st.markdown("### 📑 小节管理")
 
