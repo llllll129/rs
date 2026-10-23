@@ -28,9 +28,6 @@ def upload_file(uploaded_file, folder="images"):
             repo_url, headers=headers, timeout=15
         )
         st.info("正在连接 GitHub，检查仓库权限……")
-        st.write("正在检查的仓库：", repo)
-        st.write("GitHub 返回状态码：", repo_resp.status_code)
-        st.write("GitHub 返回内容：", repo_resp.text)
         repo_resp.raise_for_status()
         branch = repo_resp.json()["default_branch"]
 
