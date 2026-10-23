@@ -591,23 +591,35 @@ elif role == "👩‍🏫 教师端":
     tabs = st.tabs(["📚 章节结构", "📋 课堂问答", "📝 章节检测", "📄 论文管理", "🔬 实例上传", "💬 问题管理", "📊 学情总览"])
     all_chapters = get_all_chapters()
 
+
     with tabs[0]:
         st.subheader("📚 章节结构管理")
         structure = load_json(CHAPTER_STRUCTURE_FILE)
         built = list(structure.keys())
+
         col_ch, col_del = st.columns([4, 1])
+
         with col_ch:
-            sel_ch = st.selectbox("选择章节：", built + ["➕ 新建章节"], key="struct_ch")
+            sel_ch = st.selectbox(
+                "选择章节：",
+                built + ["➕ 新建章节"],
+                key="struct_ch"
+            )
+
         with col_del:
-            if sel_ch != "➕ 新建章节" and st.button("🗑️ 删除本章", key="del_chapter"):
+            if sel_ch != "➕ 新建章节" and st.button(
+                "🗑️ 删除本章", key="del_chapter"
+            ):
                 if sel_ch in structure:
                     del structure[sel_ch]
                     save_json(structure, CHAPTER_STRUCTURE_FILE)
                     st.success(f"🗑️ 章节「{sel_ch}」已删除")
                     st.rerun()
+
         if sel_ch == "➕ 新建章节":
             remaining = [c for c in all_chapters if c not in built]
-                        if remaining:
+
+            if remaining:
                 new_ch = st.selectbox(
                     "选择未创建的章节：",
                     remaining,
