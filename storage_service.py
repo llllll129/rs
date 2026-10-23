@@ -14,53 +14,37 @@ def show_secrets_debug(stage):
 
 
 
-def get_github_config():
-    try:
-        show_secrets_debug("读取 GitHub 配置前")
 
-        cfg = st.secrets["github_storage"]
-        token = cfg["token"]
-        repo = cfg["repo"].strip()
-        return token, repo
+def upload_file(uploaded_file, folder="images", token=None, repo=None):
+    import os
+    import base64
+    import uuid
+    import requests
+    import streamlit as st
 
-    except Exception as e:
+    # 兼容旧调用，但优先使用 app.py 传入的配置
+    if not token or not repo:
         try:
-            keys = list(st.secrets.keys())
-        except Exception:
-            keys = ["无法读取配置项"]
-
-        raise RuntimeError(
-            f"读取 GitHub 配置失败；"
-            f"异常类型：{type(e).__name__}；"
-            f"当前配置项：{keys}；"
-            f"详细信息：{e}"
-        ) from e
-
-
-def upload_file(uploaded_file, folder="images"):
-    show_secrets_debug("进入 upload_file")
-    st.write("当前运行文件：", __file__)
-
-    token, repo = get_github_config()
+            cfg = st.secrets["github_storage"]
+            token = token or cfg["token"]
+            repo = repo or cfg["repo"].strip()
+        except Exception as e:
+            raise RuntimeError(
+                f"无法读取 GitHub 配置：{type(e).__name__}: {e}"
+            ) from e
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
     try:
-        # 获取仓库信息和默认分支
         repo_url = f"https://api.github.com/repos/{repo}"
-        st.write("当前使用的 GitHub 仓库：", repr(repo))
-        repo_resp = requests.get(
-            repo_url, headers=headers, timeout=15
-        )
-        st.info("正在连接 GitHub，检查仓库权限……")
+        repo_resp = requests.get(repo_url, headers=headers, timeout=15)
         repo_resp.raise_for_status()
         branch = repo_resp.json()["default_branch"]
 
-        # 生成文件路径
         ext = os.path.splitext(uploaded_file.name)[1].lower()
         filename = f"{folder}/{uuid.uuid4().hex}{ext}"
 
@@ -73,15 +57,13 @@ def upload_file(uploaded_file, folder="images"):
         data = {
             "message": f"upload {filename}",
             "content": content_b64,
-            "branch": branch
+            "branch": branch,
         }
 
-        st.info("已连接 GitHub，正在上传图片……")
         resp = requests.put(
             url, headers=headers, json=data, timeout=30
         )
         resp.raise_for_status()
-        st.success("GitHub 已接收图片")
 
         return (
             f"https://raw.githubusercontent.com/"
@@ -89,12 +71,14 @@ def upload_file(uploaded_file, folder="images"):
         )
 
     except Exception as e:
-        if isinstance(e, requests.HTTPError) and e.response is not None:
-            detail = e.response.text
-        else:
-            detail = str(e)
-
+        detail = (
+            e.response.text
+            if isinstance(e, requests.HTTPError)
+            and e.response is not None
+            else str(e)
+        )
         raise RuntimeError(f"GitHub 图片上传失败：{detail}") from e
+
 
 
 def download_file(file_ref):
