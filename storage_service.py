@@ -32,6 +32,7 @@ def upload_file(uploaded_file, folder="images"):
     try:
         # 获取仓库信息和默认分支
         repo_url = f"https://api.github.com/repos/{repo}"
+        st.write("当前使用的 GitHub 仓库：", repr(repo))
         repo_resp = requests.get(
             repo_url, headers=headers, timeout=15
         )
