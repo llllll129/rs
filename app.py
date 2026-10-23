@@ -1,31 +1,11 @@
 import os
-from openai import OpenAI
 import json
 import re
-import numpy as np
 from datetime import datetime
+
+import numpy as np
 import streamlit as st
-from storage_service import save_json_to_github
-
-st.set_page_config(
-    page_title="遥感课程智能助教",
-    page_icon="🛰️",
-    layout="wide"
-)
-
-def get_upload_config():
-    try:
-        cfg = st.secrets["github_storage"]
-        return cfg["token"], cfg["repo"].strip()
-    except KeyError:
-        raise RuntimeError(
-            "当前运行实例无法读取 github_storage 配置。"
-            "请在 Streamlit Cloud 的 App settings → Secrets 中确认配置。"
-        )
-
-
-st.write("app.py 当前配置项：", list(st.secrets.keys()))
-st.write("配置文件路径：", __file__)
+from openai import OpenAI
 
 from storage_service import (
     upload_file,
@@ -35,6 +15,22 @@ from storage_service import (
     load_json_from_github,
     save_json_to_github,
 )
+
+st.set_page_config(
+    page_title="遥感课程智能助教",
+    page_icon="🛰️",
+    layout="wide",
+)
+
+
+def get_upload_config():
+    try:
+        cfg = st.secrets["github_storage"]
+        return cfg["token"], cfg["repo"].strip()
+    except KeyError as e:
+        raise RuntimeError(
+            "无法读取 github_storage 配置，请检查 Streamlit Cloud 的 Secrets。"
+        ) from e
 
 
 def get_secret(section, key, default=None):
@@ -46,11 +42,11 @@ def get_secret(section, key, default=None):
 
 API_KEY = get_secret("ai", "api_key")
 BASE_URL = get_secret(
-    "ai", "base_url",
-    "https://open.bigmodel.cn/api/paas/v4"
+    "ai", "base_url", "https://open.bigmodel.cn/api/paas/v4"
 )
 MODEL_NAME = get_secret("ai", "model", "glm-4.7-flash")
 TEACHER_PASSWORD = get_secret("auth", "teacher_password", "rs2026")
+
 
 if not API_KEY:
     st.error("尚未配置 AI API 密钥，请联系管理员。")
