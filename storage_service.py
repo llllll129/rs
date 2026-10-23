@@ -7,19 +7,26 @@ st.write("storage_service 文件位置：", __file__)
 st.write("storage_service 当前配置项：", list(st.secrets.keys()))
 
 
-def get_github_config():
-    st.write("配置文件位置：", __file__)
-    st.write("当前可读取的配置项：", list(st.secrets.keys()))
 
+def get_github_config():
     try:
         cfg = st.secrets["github_storage"]
         token = cfg["token"]
         repo = cfg["repo"].strip()
         return token, repo
     except Exception as e:
+        # 只输出配置项名称，不输出任何密钥
+        try:
+            keys = list(st.secrets.keys())
+        except Exception:
+            keys = ["无法读取配置项"]
         raise RuntimeError(
-            f"读取 GitHub 配置失败：{type(e).__name__}: {e}"
+            f"读取 GitHub 配置失败；"
+            f"异常类型：{type(e).__name__}；"
+            f"当前配置项：{keys}；"
+            f"详细信息：{e}"
         ) from e
+
 
 def upload_file(uploaded_file, folder="images"):
     """上传文件到 GitHub，返回 raw 图片链接"""
