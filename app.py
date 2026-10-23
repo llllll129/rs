@@ -15,6 +15,7 @@ st.write("storage_service 导入后，app.py 可见的 Secrets：", list(st.secr
 st.set_page_config(page_title="遥感课程智能助教", page_icon="🛰️", layout="wide")
 
 
+
 def get_secret(section, key, default=None):
     try:
         return st.secrets[section][key]
@@ -32,6 +33,7 @@ if not API_KEY:
     st.stop()
 
 llm = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
 
 LOG_FILE = "learning_log.jsonl"
 QUIZ_FILE = "quiz_tasks.json"
