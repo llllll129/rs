@@ -12,7 +12,8 @@ st.set_page_config(
     page_icon="🛰️",
     layout="wide"
 )
-
+st.write("app.py 当前配置项：", list(st.secrets.keys()))
+st.write("配置文件路径：", __file__)
 
 from storage_service import (
     upload_file,
