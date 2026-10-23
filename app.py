@@ -12,6 +12,10 @@ st.set_page_config(
     page_icon="🛰️",
     layout="wide"
 )
+
+GITHUB_TOKEN = st.secrets["github_storage"]["token"]
+GITHUB_REPO = st.secrets["github_storage"]["repo"].strip()
+
 st.write("app.py 当前配置项：", list(st.secrets.keys()))
 st.write("配置文件路径：", __file__)
 
@@ -666,8 +670,10 @@ elif role == "👩‍🏫 教师端":
             try:
                 file_ref = upload_file(
                     uploaded_img,
-                    folder="framework-images"
-                )
+                    folder="framework-images",
+                    token=GITHUB_TOKEN,
+                    repo=GITHUB_REPO,
+                 )
 
                 st.write("上传后配置项：", list(st.secrets.keys()))
 
