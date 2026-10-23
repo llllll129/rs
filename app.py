@@ -617,19 +617,63 @@ elif role == "👩‍🏫 教师端":
             st.stop()
         ch_data = structure[sel_ch]
 
-        st.markdown("### 📊 本章框架图")
+                st.markdown("### 📊 本章框架图")
+
         if ch_data.get("framework_image"):
-            display_course_image(ch_data["framework_image"], width=500)
-        uploaded_img = st.file_uploader("上传框架图（图片或Word）", type=["png","jpg","jpeg","docx"], key="fw_upload")
+            display_course_image(
+                ch_data["framework_image"],
+                width=500
+            )
+        else:
+            st.info("📊 暂无框架图")
+
+        uploaded_img = st.file_uploader(
+            "上传框架图（图片或Word）",
+            type=["png", "jpg", "jpeg", "docx"],
+            key="fw_upload"
+        )
+
         if uploaded_img:
+            st.write("上传前配置项：", list(st.secrets.keys()))
 
-        st.markdown("---"); st.markdown("### 📑 小节管理")
+            try:
+                file_ref = upload_file(
+                    uploaded_img,
+                    folder="framework-images"
+                )
+
+                st.write("上传后配置项：", list(st.secrets.keys()))
+
+                ch_data["framework_image"] = file_ref
+                save_json(structure, CHAPTER_STRUCTURE_FILE)
+
+                st.success("✅ 框架图已上传")
+                st.rerun()
+
+            except Exception as e:
+                st.write("失败时配置项：", list(st.secrets.keys()))
+                st.error(f"上传失败：{e}")
+
+        st.markdown("---")
+        st.markdown("### 📑 小节管理")
+
         sections = ch_data.get("sections", [])
-        new_sec_title = st.text_input("新小节标题：", placeholder="例如：§1.1 电磁辐射原理", key="new_sec_title")
-        if st.button("➕ 添加小节", key="add_section_btn") and new_sec_title:
-            sections.append({"title": new_sec_title, "knowledge_points": []})
-            ch_data["sections"] = sections; save_json(structure, CHAPTER_STRUCTURE_FILE); st.success(f"✅ 小节「{new_sec_title}」已添加"); st.rerun()
 
+        new_sec_title = st.text_input(
+            "新小节标题：",
+            placeholder="例如：§1.1 电磁辐射原理",
+            key="new_sec_title"
+        )
+
+        if st.button("➕ 添加小节", key="add_section_btn") and new_sec_title:
+            sections.append({
+                "title": new_sec_title,
+                "knowledge_points": []
+            })
+            ch_data["sections"] = sections
+            save_json(structure, CHAPTER_STRUCTURE_FILE)
+            st.success(f"✅ 小节「{new_sec_title}」已添加")
+            st.rerun()
         for i, sec in enumerate(sections):
             st.markdown("---"); st.markdown(f"### 📖 {sec['title']}（{len(sec.get('knowledge_points', []))}个知识点）")
             kps = sec.get("knowledge_points", [])
