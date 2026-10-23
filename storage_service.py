@@ -41,7 +41,11 @@ def upload_file(uploaded_file, folder="images", token=None, repo=None):
 
     repo_url = f"https://api.github.com/repos/{repo}"
     repo_resp = requests.get(repo_url, headers=headers, timeout=15)
-    repo_resp.raise_for_status()
+    if not resp.ok:
+    raise RuntimeError(
+        f"GitHub 上传失败，状态码：{resp.status_code}；"
+        f"原因：{resp.text}"
+    )
     branch = repo_resp.json()["default_branch"]
 
     ext = os.path.splitext(uploaded_file.name)[1].lower()
