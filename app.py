@@ -6,6 +6,7 @@ import re
 import numpy as np
 from datetime import datetime
 import streamlit as st
+from storage_service import save_json_to_github
 
 st.set_page_config(
     page_title="遥感课程智能助教",
@@ -685,7 +686,7 @@ elif role == "👩‍🏫 教师端":
                 )
 
                 ch_data["framework_image"] = file_ref
-                save_json(structure, CHAPTER_STRUCTURE_FILE)
+                save_json_to_github(structure, "chapter_structure.json")
 
                 st.success("✅ 框架图已上传")
                 st.rerun()
