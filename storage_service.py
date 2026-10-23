@@ -29,7 +29,9 @@ def get_github_config():
 
 
 def upload_file(uploaded_file, folder="images"):
-    """上传文件到 GitHub，返回 raw 图片链接"""
+    st.write("进入 upload_file，配置项：", list(st.secrets.keys()))
+    st.write("当前运行文件：", __file__)
+
     token, repo = get_github_config()
 
     headers = {
