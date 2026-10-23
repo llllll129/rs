@@ -13,7 +13,6 @@ st.set_page_config(
     layout="wide"
 )
 
-st.write("app.py 可见的 Secrets：", list(st.secrets.keys()))
 
 from storage_service import (
     upload_file,
@@ -21,12 +20,6 @@ from storage_service import (
     show_video,
     download_bytes
 )
-
-st.write(
-    "storage_service 导入后，app.py 可见的 Secrets：",
-    list(st.secrets.keys())
-)
-
 
 
 
