@@ -607,17 +607,32 @@ elif role == "👩‍🏫 教师端":
                     st.rerun()
         if sel_ch == "➕ 新建章节":
             remaining = [c for c in all_chapters if c not in built]
-            if remaining:
-                new_ch = st.selectbox("选择未创建的章节：", remaining, key="new_ch")
+                        if remaining:
+                new_ch = st.selectbox(
+                    "选择未创建的章节：",
+                    remaining,
+                    key="new_ch"
+                )
             else:
-                new_ch = st.text_input("所有章节已创建，手动输入新章节名：", key="manual_new_ch")
+                new_ch = st.text_input(
+                    "所有章节已创建，手动输入新章节名：",
+                    key="manual_new_ch"
+                )
+
             if st.button("✅ 创建章节", key="create_ch_btn") and new_ch:
-                structure[new_ch] = {"framework_image": "", "sections": []}
-                save_json(structure, CHAPTER_STRUCTURE_FILE); st.success(f"✅ 章节「{new_ch}」已创建"); st.rerun()
+                structure[new_ch] = {
+                    "framework_image": "",
+                    "sections": []
+                }
+                save_json(structure, CHAPTER_STRUCTURE_FILE)
+                st.success(f"✅ 章节「{new_ch}」已创建")
+                st.rerun()
+
             st.stop()
+
         ch_data = structure[sel_ch]
 
-                st.markdown("### 📊 本章框架图")
+        st.markdown("### 📊 本章框架图")
 
         if ch_data.get("framework_image"):
             display_course_image(
