@@ -19,6 +19,7 @@ from storage_service import (
     storage_status,
     storage_diagnostics,
     save_framework_image,
+    save_paper_files,
 )
 
 st.set_page_config(
@@ -226,6 +227,29 @@ def save_json(data, path):
             st.stop()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def render_paper_file(paper, key_prefix):
+    """缺失原文件时不创建下载按钮；教师可补传，学生只显示可用状态。"""
+    try:
+        data = download_bytes(paper.get("file_path", ""))
+    except (StorageError, OSError):
+        if st.session_state.get("role") == "👩‍🏫 教师端" and st.session_state.get("teacher_auth", False):
+            st.warning("原文件暂不可用。请在“上传文件”中选择“按原记录补传”，上传同名原文件恢复下载。")
+        else:
+            st.info("论文文件暂不可下载，请联系教师补充文件。")
+        return
+    st.download_button("📥 下载论文", data, file_name=paper["title"], key=f"{key_prefix}_download")
+    if paper["title"].lower().endswith(".txt"):
+        st.text_area("论文内容：", data.decode("utf-8", errors="replace"), height=300, key=f"{key_prefix}_text")
+    elif paper["title"].lower().endswith(".docx"):
+        try:
+            from docx import Document
+            import io
+            doc = Document(io.BytesIO(data))
+            st.text_area("论文内容：", "\n".join(para.text for para in doc.paragraphs)[:5000], height=300, key=f"{key_prefix}_text")
+        except Exception:
+            st.caption("此文件可下载后查看。")
 
 
 def render_framework_editor(chapter, chapter_data):
@@ -598,26 +622,11 @@ if role == "👨‍🎓 学生端":
         else:
             chapters = list(set(p["chapter"] for p in papers))
             sel = st.selectbox("章节：", chapters)
-            for p in papers:
+            for idx, p in enumerate(papers):
                 if p["chapter"] == sel:
                     if p.get("is_file"):
                         with st.expander(f"📄 {p['title']}"):
-                            try:
-                                data = download_bytes(p.get('file_path', ''))
-                                if p['title'].lower().endswith('.pdf'):
-                                    st.download_button("📥 下载论文", data, file_name=p['title'])
-                                elif p['title'].lower().endswith('.txt'):
-                                    st.text_area("论文内容：", data.decode('utf-8', errors='ignore'), height=300)
-                                elif p['title'].lower().endswith(('.docx', '.doc')):
-                                    try:
-                                        from docx import Document
-                                        import io
-                                        doc = Document(io.BytesIO(data))
-                                        st.text_area("论文内容：", "\n".join([para.text for para in doc.paragraphs])[:5000], height=300)
-                                    except:
-                                        st.download_button("📥 下载论文", data, file_name=p['title'])
-                            except Exception as e:
-                                st.caption(f"文件不可用：{e}")
+                            render_paper_file(p, key_prefix=f"student_paper_{idx}")
                     else:
                         with st.expander(f"📄 {p['title']}"): st.write(f"**作者**：{p.get('author','')}，**摘要**：{p.get('abstract','')}")
 
@@ -1091,21 +1100,34 @@ elif role == "👩‍🏫 教师端":
                 if not isinstance(papers, list): papers = []
                 papers.append({"chapter":sel,"title":title,"author":author,"abstract":abstract}); save_json(papers, PAPER_FILE); st.success("✅ 已添加"); st.rerun()
         else:
+            restore_mode = st.radio(
+                "文件保存方式", ["上传到当前章节", "按原记录补传（匹配全部章节）"], key="paper_restore_mode"
+            )
+            st.caption("补传请使用原文件名。成功后保存原文件及其地址，并保留已有章节、作者和摘要。")
+            feedback = st.session_state.get("paper_upload_result")
+            if feedback:
+                if feedback["ok"]:
+                    st.success(feedback["message"])
+                else:
+                    st.error(feedback["message"])
             uploaded_papers = st.file_uploader("上传论文文件（可多选）", type=["pdf","docx","doc","txt"], accept_multiple_files=True, key="paper_files_upload")
             if st.button("保存所选论文文件", key=f"paper_save_{sel}", disabled=not uploaded_papers):
-                papers = load_json(PAPER_FILE)
-                if not isinstance(papers, list): papers = []
-                existing_names = {p.get("title","") for p in papers if p.get("chapter")==sel}
-                added = 0
-                for up in uploaded_papers:
-                    if up.name in existing_names: continue
-                    try:
-                        file_ref = upload_file(up, folder="papers")
-                        papers.append({"chapter":sel,"title":up.name,"author":"","abstract":"","file_path":file_ref,"is_file":True}); added += 1
-                    except Exception as e:
-                        st.error(f"上传失败：{e}"); st.stop()
-                save_json(papers, PAPER_FILE)
-                if added > 0: st.success(f"✅ 已上传 {added} 篇论文"); st.rerun()
+                progress_area = st.empty()
+                try:
+                    result = save_paper_files(
+                        uploaded_papers, chapter=sel,
+                        restore_existing=restore_mode.startswith("按原记录"),
+                        progress=progress_area.info,
+                    )
+                except StorageError as exc:
+                    message = str(exc)
+                    st.session_state["paper_upload_result"] = {"ok": False, "message": message}
+                    progress_area.error(message)
+                else:
+                    message = (f"✅ 已保存并核对 {result['saved']} 个文件：新增 {result['added']}，"
+                               f"补传更新 {result['restored']}，复用 {result['unchanged']}。")
+                    st.session_state["paper_upload_result"] = {"ok": True, "message": message}
+                    st.rerun()
         papers = load_json(PAPER_FILE)
         if isinstance(papers, list) and papers:
             st.markdown("---"); st.markdown("### 📄 已推荐论文")
@@ -1113,11 +1135,7 @@ elif role == "👩‍🏫 教师端":
                 if p.get("chapter") != sel: continue
                 if p.get("is_file"):
                     with st.expander(f"📄 {p['title']}"):
-                        try:
-                            data = download_bytes(p.get('file_path',''))
-                            st.download_button("📥 下载论文", data, file_name=p['title'], key=f"dl_paper_{idx}")
-                        except Exception as e:
-                            st.caption(f"文件不可用：{e}")
+                        render_paper_file(p, key_prefix=f"teacher_paper_{idx}")
                         if st.button("🗑️ 删除", key=f"del_paper_{idx}"): papers.pop(idx); save_json(papers, PAPER_FILE); st.rerun()
                 else:
                     with st.expander(f"📄 {p['title']}"):

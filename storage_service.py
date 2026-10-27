@@ -339,7 +339,10 @@ def show_video(file_ref, **kwargs):
 
 
 def download_bytes(file_ref):
-    return download_file(file_ref)
+    data = download_file(file_ref)
+    if data is None:
+        raise StorageError('未找到原文件。旧记录只有文件路径，需补传原文件后才能下载。')
+    return data
 
 
 
@@ -384,6 +387,74 @@ def save_framework_image(uploaded_file, chapter, progress=None):
         return ref
     except StorageError as exc:
         raise StorageError(f'{stage}失败：{exc}') from None
+    finally:
+        if operation_token is not None:
+            _OPERATION_CONTEXT.reset(operation_token)
+
+
+
+def save_paper_files(uploaded_files, chapter=None, restore_existing=False, progress=None):
+    """将原文件和论文索引一并保存；同名补传保留原记录的其他字段。"""
+    if not uploaded_files:
+        raise StorageError('请先选择论文文件。')
+    if not restore_existing and not chapter:
+        raise StorageError('请先选择章节。')
+    operation_token = None
+    result = {'saved': 0, 'added': 0, 'restored': 0, 'unchanged': 0}
+    current_name = ''
+    stage = '读取论文记录'
+    try:
+        operation_token = _OPERATION_CONTEXT.set(_context())
+        papers, _ = load_json_from_github('papers.json')
+        if any(not isinstance(record, dict) for record in papers):
+            raise StorageError('论文索引包含无效记录，已停止修改。')
+        for uploaded in uploaded_files:
+            current_name = uploaded.name
+            if Path(current_name).suffix.lower() not in {'.pdf', '.docx', '.doc', '.txt'}:
+                raise StorageError('仅支持 PDF、Word 或 TXT 论文文件。')
+            stage = '匹配论文记录'
+            matches = [i for i, record in enumerate(papers)
+                       if record.get('title') == current_name
+                       and (restore_existing or record.get('chapter') == chapter)]
+            if len(matches) > 1:
+                raise StorageError('存在多条同名记录，请切换“上传到当前章节”后按章节补传，避免错误匹配。')
+            if restore_existing and not matches:
+                raise StorageError('没有找到同名原记录；请使用原文件名，或切换“上传到当前章节”。')
+            stage = '上传并读回核对原文件'
+            if progress is not None:
+                progress(f'{current_name}：{stage}')
+            ref = upload_file(uploaded, folder='papers')
+            actual = download_bytes(ref)
+            uploaded.seek(0)
+            if hashlib.sha256(actual).digest() != hashlib.sha256(uploaded.read()).digest():
+                raise StorageError('文件读回校验失败，本文件未写入论文索引。')
+            if matches:
+                record = papers[matches[0]]
+                unchanged = record.get('file_path') == ref and record.get('is_file') is True
+                record['file_path'] = ref
+                record['is_file'] = True
+                outcome = 'unchanged' if unchanged else 'restored'
+            else:
+                papers.append({'chapter': chapter, 'title': current_name, 'author': '',
+                               'abstract': '', 'file_path': ref, 'is_file': True})
+                outcome = 'added'
+            stage = '保存论文索引'
+            if progress is not None:
+                progress(f'{current_name}：{stage}')
+            # 每个文件单独确认索引，后续某个文件失败时不丢失前面已完成的保存。
+            save_json_to_github(papers, 'papers.json')
+            confirmed, _ = load_json_from_github('papers.json')
+            wanted_chapter = record.get('chapter') if matches else chapter
+            if not any(r.get('title') == current_name and r.get('chapter') == wanted_chapter
+                       and r.get('file_path') == ref for r in confirmed):
+                raise StorageError('论文索引读回不一致，请刷新检查。')
+            papers = confirmed
+            result['saved'] += 1
+            result[outcome] += 1
+        return result
+    except StorageError as exc:
+        name = f'“{current_name}”' if current_name else ''
+        raise StorageError(f'已完成 {result["saved"]} 个文件；{name}{stage}失败：{exc}') from None
     finally:
         if operation_token is not None:
             _OPERATION_CONTEXT.reset(operation_token)
