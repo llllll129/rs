@@ -17,6 +17,8 @@ from storage_service import (
     StorageError,
     StorageConfigurationError,
     storage_status,
+    storage_diagnostics,
+    save_framework_image,
 )
 
 st.set_page_config(
@@ -224,6 +226,63 @@ def save_json(data, path):
             st.stop()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def render_framework_editor(chapter, chapter_data):
+    """分开显示已保存图片与待保存图片，并保留上传的最终结果。"""
+    st.markdown("### 📊 本章框架图")
+    result_key = f"fw_result_{chapter}"
+    result = st.session_state.get(result_key)
+    current_ref = chapter_data.get("framework_image", "")
+    if result and result.get("ok") and result.get("ref") == current_ref:
+        st.success("✅ 框架图已保存，图片文件和章节记录均已读回核对。")
+    elif result and not result.get("ok"):
+        st.error(result["message"])
+
+    if current_ref:
+        st.caption("当前课程记录中的框架图")
+        if current_ref.replace(chr(92), "/").startswith("uploads/"):
+            st.info("当前记录仍指向旧的 uploads 图片。下方选图后需点击“保存框架图”；保存成功后将显示新图。")
+        display_course_image(current_ref, width=500)
+    else:
+        st.info("📊 暂无已保存的框架图")
+
+    with st.expander("存储连接与当前图片地址"):
+        st.caption(storage_message)
+        st.code(current_ref or "尚未保存图片地址", language="text")
+        if st.button("检查存储连接", key=f"fw_check_{chapter}"):
+            try:
+                status = storage_diagnostics()
+                st.success(f"连接成功：{status['repo']} / {status['branch']}；已读取 {status['chapter_count']} 个章节。")
+            except StorageError as exc:
+                st.error(str(exc))
+
+    uploaded = st.file_uploader(
+        "选择新框架图（PNG/JPG，选图后还需点击保存）",
+        type=["png", "jpg", "jpeg"], key=f"fw_upload_{chapter}",
+    )
+    valid_image = uploaded is not None
+    if uploaded is not None:
+        try:
+            st.image(uploaded.getvalue(), width=500, caption="待保存预览：此时尚未写入课程")
+        except Exception:
+            valid_image = False
+            st.error("该文件无法解码为图片，请选择可正常打开的 PNG/JPG 文件。")
+    if st.button("保存框架图", key=f"fw_save_{chapter}", disabled=not valid_image):
+        progress_area = st.empty()
+        try:
+            ref = save_framework_image(uploaded, chapter, progress=progress_area.info)
+        except StorageError as exc:
+            message = f"框架图未完成保存：{exc}"
+            st.session_state[result_key] = {"ok": False, "message": message}
+            progress_area.error(message)
+        except Exception as exc:
+            message = f"框架图未完成保存（{type(exc).__name__}），请保留 Cloud 日志供排查。"
+            st.session_state[result_key] = {"ok": False, "message": message}
+            progress_area.error(message)
+        else:
+            st.session_state[result_key] = {"ok": True, "ref": ref}
+            st.rerun()
 
 
 def generate_think_question(kp_title, textbook_content, chapter):
@@ -671,39 +730,7 @@ elif role == "👩‍🏫 教师端":
 
         ch_data = structure[sel_ch]
 
-        st.markdown("### 📊 本章框架图")
-
-        if ch_data.get("framework_image"):
-            display_course_image(
-                ch_data["framework_image"],
-                width=500
-            )
-        else:
-            st.info("📊 暂无框架图")
-
-        uploaded_img = st.file_uploader(
-            "上传框架图（PNG/JPG）",
-            type=["png", "jpg", "jpeg"],
-            key=f"fw_upload_{sel_ch}"
-        )
-
-        if st.button("保存框架图", key=f"fw_save_{sel_ch}", disabled=uploaded_img is None):
-            try:
-                file_ref = upload_file(
-                    uploaded_img,
-                    folder="framework-images",
-                )
-
-                ch_data["framework_image"] = file_ref
-                save_json(structure, CHAPTER_STRUCTURE_FILE)
-
-                st.success("✅ 框架图已上传")
-                st.rerun()
-
-            except Exception as e:
-                st.error(f"上传失败：{e}"); st.stop()
-
-        
+        render_framework_editor(sel_ch, ch_data)
         st.markdown("---")
         st.markdown("### 📑 小节管理")
 

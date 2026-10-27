@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import logging
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlparse
@@ -12,6 +13,9 @@ import streamlit as st
 
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger(__name__)
+DEFAULT_DATA_BRANCH = 'rs-data'
+# 仅在一次上传内保留配置快照；结束后清除，不跨用户缓存令牌。
+_OPERATION_CONTEXT = ContextVar('rs_storage_operation', default=None)
 
 
 class StorageError(RuntimeError):
@@ -31,15 +35,16 @@ def _configuration(token=None, repo=None):
     repo = repo or cfg.get('repo')
     if not isinstance(token, str) or not token.strip():
         raise StorageConfigurationError(
-            '永久图片存储未配置：请在 Streamlit → Manage app → Settings → Secrets '
-            '中添加顶层 [github_storage]，并填写 token 和 repo。令牌只填写在 Secrets 中。'
+            '当前运行实例未读取到 [github_storage] 中的 token。'
+            '若云端配置已保存，请重新保存 Secrets 并重启应用后重试，无需重新创建令牌。'
+            '令牌只填写在 Streamlit 云端 Secrets 中。'
         )
     if not isinstance(repo, str) or len(repo.strip().split('/')) != 2:
         raise StorageConfigurationError('github_storage.repo 必须填写“账号/仓库名”，例如 llllll129/rs。')
     repo = repo.strip()
     if any(not part or any(ch.isspace() for ch in part) for part in repo.split('/')) or ':' in repo or '..' in repo:
         raise StorageConfigurationError('github_storage.repo 格式无效，请填写“账号/仓库名”。')
-    branch = cfg.get('branch', '')
+    branch = cfg.get('data_branch', cfg.get('branch', ''))
     if not isinstance(branch, str):
         raise StorageConfigurationError('github_storage.branch 必须是分支名称字符串。')
     return token.strip(), repo, branch.strip()
@@ -54,7 +59,7 @@ def storage_status():
     """仅检查配置格式，不联网，不输出密钥。"""
     try:
         _, repo, branch = _configuration()
-        return True, f'存储仓库：{repo}；分支：{branch or "仓库默认分支"}'
+        return True, f'存储仓库：{repo}；数据与部署分支分开保存（实际数据分支可通过检查连接查看）'
     except StorageConfigurationError as exc:
         return False, str(exc)
 
@@ -89,13 +94,19 @@ def _request(method, repo, path='', *, token, allow_missing=False, raw=False, **
 @lru_cache(maxsize=8)
 def _branch_for(token, repo, configured_branch):
     info = _request('GET', repo, token=token).json()
-    branch = configured_branch or info['default_branch']
+    # 旧配置若指向仓库默认部署分支，也迁往独立数据分支。
+    branch = configured_branch or DEFAULT_DATA_BRANCH
+    if branch == info['default_branch']:
+        branch = DEFAULT_DATA_BRANCH
     # 先核实分支，避免把“分支不存在”的 404 当作“JSON 尚未创建”。
     _request('GET', repo, 'git/ref/heads/' + quote(branch, safe='/'), token=token)
     return branch
 
 
 def _context(token=None, repo=None):
+    active = _OPERATION_CONTEXT.get()
+    if active is not None and token is None and repo is None:
+        return active
     token, repo, configured = _configuration(token, repo)
     return token, repo, _branch_for(token, repo, configured)
 
@@ -270,10 +281,14 @@ def download_file(file_ref):
         parts = parsed.path.lstrip('/').split('/', 3)
         if len(parts) == 4:
             owner, name, branch, path = parts
-            try:
-                token, repo, _ = _configuration()
-            except StorageConfigurationError:
-                token, repo = None, None
+            active = _OPERATION_CONTEXT.get()
+            if active is not None:
+                token, repo, _ = active
+            else:
+                try:
+                    token, repo, _ = _configuration()
+                except StorageConfigurationError:
+                    token, repo = None, None
             if repo and repo.lower() == f'{owner}/{name}'.lower():
                 result = _content(token, repo, unquote(branch), unquote(path), raw=True)
                 return None if result is None else result.content
@@ -318,3 +333,50 @@ def show_video(file_ref, **kwargs):
 
 def download_bytes(file_ref):
     return download_file(file_ref)
+
+
+
+def storage_diagnostics():
+    """验证真实连接及课程读取，不写文件，不返回密钥。"""
+    token, repo, branch = _context()
+    course, _ = _read_json(token, repo, branch, 'chapter_structure.json')
+    return {'repo': repo, 'branch': branch, 'course_exists': course is not None,
+            'chapter_count': len(course) if course is not None else 0}
+
+
+def save_framework_image(uploaded_file, chapter, progress=None):
+    """图片与章节引用都读回校验通过后，才确认框架图保存成功。"""
+    stage = '读取课程记录'
+    operation_token = None
+    def report(message):
+        nonlocal stage
+        stage = message
+        if progress is not None:
+            progress(message)
+    try:
+        report('读取课程记录')
+        operation_token = _OPERATION_CONTEXT.set(_context())
+        course, _ = load_json_from_github('chapter_structure.json')
+        if chapter not in course or not isinstance(course[chapter], dict):
+            raise StorageError('该章节已不存在，请刷新章节列表后重试。')
+        report('上传图片文件')
+        ref = upload_file(uploaded_file, folder='framework-images')
+        report('读回校验图片')
+        uploaded_file.seek(0)
+        expected = uploaded_file.read()
+        actual = download_file(ref)
+        if actual is None or hashlib.sha256(actual).digest() != hashlib.sha256(expected).digest():
+            raise StorageError('图片读回校验未通过，本次未更新章节引用；请重试。')
+        report('保存课程中的图片地址')
+        course[chapter]['framework_image'] = ref
+        save_json_to_github(course, 'chapter_structure.json')
+        report('读回核对课程记录')
+        confirmed, _ = load_json_from_github('chapter_structure.json')
+        if confirmed.get(chapter, {}).get('framework_image') != ref:
+            raise StorageError('课程记录与本次上传不一致，可能存在其他修改，请刷新核查。')
+        return ref
+    except StorageError as exc:
+        raise StorageError(f'{stage}失败：{exc}') from None
+    finally:
+        if operation_token is not None:
+            _OPERATION_CONTEXT.reset(operation_token)
