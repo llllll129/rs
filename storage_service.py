@@ -301,15 +301,22 @@ def download_file(file_ref):
 
 
 def show_image(file_ref, **kwargs):
+    # 学生端隐藏图片故障提示；已登录教师仍可查看排查信息。
+    show_diagnostics = (
+        st.session_state.get('role') == '👩‍🏫 教师端'
+        and st.session_state.get('teacher_auth', False)
+    )
     try:
         data = download_file(file_ref)
         if data is None:
-            st.warning('未找到图片原文件。请检查仓库路径；旧文件缺失时需从备份恢复。')
+            if show_diagnostics:
+                st.warning('未找到图片原文件。请检查仓库路径；旧文件缺失时需从备份恢复。')
         else:
             st.image(data, **kwargs)
     except (StorageError, OSError, ValueError):
         LOG.warning('图片读取或解码失败', exc_info=True)
-        st.warning('图片暂时无法显示，请检查存储配置、文件格式或仓库权限。')
+        if show_diagnostics:
+            st.warning('图片暂时无法显示，请检查存储配置、文件格式或仓库权限。')
 
 
 def display_course_image(file_ref, **kwargs):
