@@ -14,6 +14,9 @@ from storage_service import (
     download_bytes,
     load_json_from_github,
     save_json_to_github,
+    StorageError,
+    StorageConfigurationError,
+    storage_status,
 )
 
 st.set_page_config(
@@ -21,16 +24,6 @@ st.set_page_config(
     page_icon="🛰️",
     layout="wide",
 )
-
-
-def get_upload_config():
-    try:
-        cfg = st.secrets["github_storage"]
-        return cfg["token"], cfg["repo"].strip()
-    except KeyError as e:
-        raise RuntimeError(
-            "无法读取 github_storage 配置，请检查 Streamlit Cloud 的 Secrets。"
-        ) from e
 
 
 def get_secret(section, key, default=None):
@@ -64,6 +57,11 @@ CLASS_QA_FILE = "class_qa.json"
 UPLOAD_DIR = "uploads"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+# 配置缺失时给出可操作的提示；不会把本地临时写入当作永久保存。
+storage_ready, storage_message = storage_status()
+if not storage_ready:
+    st.warning(storage_message)
+
 
 st.markdown("""
 <style>
@@ -142,7 +140,7 @@ def get_all_chapters():
     chapters = set()
     for meta in results["metadatas"]:
         chapters.add(meta.get("chapter", "未知"))
-    structure, _ = load_json_from_github("chapter_structure.json")
+    structure = load_json(CHAPTER_STRUCTURE_FILE)
     if structure:
         chapters.update(structure.keys())
     return sorted(chapters)
@@ -193,22 +191,37 @@ def call_llm(system_prompt, user_content, max_tokens=800):
     return response.choices[0].message.content
 
 
+# 图片对应的课程、案例和论文索引统一持久化；学生个人记录不写入公开仓库。
+REMOTE_RECORDS = {CHAPTER_STRUCTURE_FILE, CASE_FILE, PAPER_FILE}
+
+
 def load_json(path):
-    # 课程结构统一以 GitHub 为准，避免上传后又读到旧的本地记录。
-    if path == CHAPTER_STRUCTURE_FILE:
-        return load_json_from_github(path)[0]
+    if path in REMOTE_RECORDS:
+        try:
+            return load_json_from_github(path)[0]
+        except StorageConfigurationError:
+            # 未配置时仅浏览随项目部署的记录；保存仍会明确失败。
+            pass
+        except StorageError as exc:
+            st.error(str(exc))
+            st.stop()
     if not os.path.exists(path):
         return {} if path in [STUDY_LOG_FILE, CHAPTER_STRUCTURE_FILE] else []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         try:
             return json.load(f)
-        except:
-            return {} if path in [STUDY_LOG_FILE, CHAPTER_STRUCTURE_FILE] else []
+        except (ValueError, UnicodeError):
+            st.error(f"{path} 格式损坏，请从备份恢复；未将其当作空记录覆盖。")
+            st.stop()
 
 
 def save_json(data, path):
-    if path == CHAPTER_STRUCTURE_FILE:
-        return save_json_to_github(data, path)
+    if path in REMOTE_RECORDS:
+        try:
+            return save_json_to_github(data, path)
+        except StorageError as exc:
+            st.error(str(exc))
+            st.stop()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -582,7 +595,7 @@ if role == "👨‍🎓 学生端":
                 try:
                     sp = upload_file(uf, folder="student-uploads")
                 except Exception as e:
-                    st.error(f"上传失败：{e}"); sp = None
+                    st.error(f"上传失败：{e}"); st.stop()
             ctx = "\n".join(search_textbook(q, chapter_filter=sel_ch))
             ans = call_llm("你是遥感助教。根据课本回答。末尾标注【问题已解决】或【需要老师查看】", f"【课本】\n{ctx}\n\n【问题】\n{q}")
             log_interaction("qa", {"student_id":student_id,"student_name":student_name,"chapter":sel_ch,"question":q,"answer":ans,"screenshot":sp or "","needs_teacher":"需要老师" in ans,"resolved":not ("需要老师" in ans)})
@@ -676,25 +689,19 @@ elif role == "👩‍🏫 教师端":
 
         if st.button("保存框架图", key=f"fw_save_{sel_ch}", disabled=uploaded_img is None):
             try:
-                cfg = st.secrets["github_storage"]
-                token = cfg["token"]
-                repo = cfg["repo"].strip()
-
                 file_ref = upload_file(
                     uploaded_img,
                     folder="framework-images",
-                    token=token,
-                    repo=repo,
                 )
 
                 ch_data["framework_image"] = file_ref
-                save_json_to_github(structure, "chapter_structure.json")
+                save_json(structure, CHAPTER_STRUCTURE_FILE)
 
                 st.success("✅ 框架图已上传")
                 st.rerun()
 
             except Exception as e:
-                st.error(f"上传失败：{e}")
+                st.error(f"上传失败：{e}"); st.stop()
 
         
         st.markdown("---")
@@ -725,102 +732,107 @@ elif role == "👩‍🏫 教师端":
             kp_title_input = st.text_input("知识点标题：", key=f"new_kp_title_{i}", placeholder="例如：电磁辐射基本概念")
             if st.button(f"🔍 检索课本内容", key=f"new_kp_search_{i}") and kp_title_input:
                 with st.spinner("正在检索并整理课本内容..."): textbook = search_and_format_textbook(kp_title_input, chapter_filter=sel_ch, n_results=4)
-                st.session_state[f"new_kp_textbook_{i}"] = textbook; st.session_state[f"new_kp_title_val_{i}"] = kp_title_input
-                st.session_state[f"new_think_{i}"] = ""; st.session_state[f"new_kp_img_list_{i}"] = []; st.session_state[f"new_kp_tb_img_list_{i}"] = []
+                st.session_state[f"new_kp_textbook_{sel_ch}_{i}"] = textbook; st.session_state[f"new_kp_title_val_{sel_ch}_{i}"] = kp_title_input
+                st.session_state[f"new_think_{sel_ch}_{i}"] = ""; st.session_state[f"new_kp_img_list_{sel_ch}_{i}"] = []; st.session_state[f"new_kp_tb_img_list_{sel_ch}_{i}"] = []
                 st.rerun()
 
-            if f"new_kp_title_val_{i}" in st.session_state:
-                kp_title_val = st.session_state[f"new_kp_title_val_{i}"]; textbook = st.session_state.get(f"new_kp_textbook_{i}", "")
+            if f"new_kp_title_val_{sel_ch}_{i}" in st.session_state:
+                kp_title_val = st.session_state[f"new_kp_title_val_{sel_ch}_{i}"]; textbook = st.session_state.get(f"new_kp_textbook_{sel_ch}_{i}", "")
                 st.markdown(f"**正在添加：{kp_title_val}**")
                 st.markdown("##### 📖 课本内容（可编辑）")
-                edited_textbook = st.text_area("课本内容：", textbook, height=200, key=f"new_kp_tb_edit_{i}", label_visibility="collapsed")
+                edited_textbook = st.text_area("课本内容：", textbook, height=200, key=f"new_kp_tb_edit_{sel_ch}_{i}", label_visibility="collapsed")
 
                 st.markdown("##### 🖼️ 课本配图（可多选）")
-                if f"new_kp_tb_img_list_{i}" not in st.session_state: st.session_state[f"new_kp_tb_img_list_{i}"] = []
-                tb_multi = st.file_uploader("选择课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"tb_multi_{i}")
+                if f"new_kp_tb_img_list_{sel_ch}_{i}" not in st.session_state: st.session_state[f"new_kp_tb_img_list_{sel_ch}_{i}"] = []
+                tb_multi = st.file_uploader("选择课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"tb_multi_{sel_ch}_{i}")
                 if st.button("上传所选课本配图", key=f"tb_save_{sel_ch}_{i}", disabled=not tb_multi):
                     for uf in tb_multi:
                         try:
                             ref = upload_file(uf, folder="textbook-images")
-                            st.session_state[f"new_kp_tb_img_list_{i}"].append(ref)
+                            if ref not in st.session_state[f"new_kp_tb_img_list_{sel_ch}_{i}"]:
+                                st.session_state[f"new_kp_tb_img_list_{sel_ch}_{i}"].append(ref)
                         except Exception as e:
-                            st.error(f"上传失败：{e}")
+                            st.error(f"上传失败：{e}"); st.stop()
                     st.rerun()
-                tb_list = st.session_state[f"new_kp_tb_img_list_{i}"]
+                tb_list = st.session_state[f"new_kp_tb_img_list_{sel_ch}_{i}"]
                 if tb_list:
                     st.caption(f"已上传 {len(tb_list)} 张课本配图：")
                     cols = st.columns(4)
                     for idx, p in enumerate(tb_list):
                         with cols[idx % 4]:
                             display_course_image(p, width=100)
-                            if st.button("🗑️", key=f"dtb_{i}_{idx}"): st.session_state[f"new_kp_tb_img_list_{i}"].pop(idx); st.rerun()
+                            if st.button("🗑️", key=f"dtb_{sel_ch}_{i}_{idx}"): st.session_state[f"new_kp_tb_img_list_{sel_ch}_{i}"].pop(idx); st.rerun()
 
                 st.markdown("##### 🤔 思考题")
-                if f"new_think_{i}" not in st.session_state: st.session_state[f"new_think_{i}"] = ""
+                if f"new_think_{sel_ch}_{i}" not in st.session_state: st.session_state[f"new_think_{sel_ch}_{i}"] = ""
                 if st.button("🎲 自动生成思考题", key=f"gen_think_btn_{i}", use_container_width=True):
-                    with st.spinner("生成中..."): st.session_state[f"new_think_{i}"] = generate_think_question(kp_title_val, edited_textbook, sel_ch)
+                    with st.spinner("生成中..."): st.session_state[f"new_think_{sel_ch}_{i}"] = generate_think_question(kp_title_val, edited_textbook, sel_ch)
                     st.rerun()
-                think_input = st.text_area("思考题：", key=f"new_think_{i}", placeholder="点击上方按钮自动生成，或手动输入")
+                think_input = st.text_area("思考题：", key=f"new_think_{sel_ch}_{i}", placeholder="点击上方按钮自动生成，或手动输入")
 
                 st.markdown("##### 🌰 生活实例（可选）")
-                life_text = st.text_area("实例文字说明：", key=f"new_kp_life_{i}", height=68, placeholder="例如：微波炉加热食物就是电磁辐射在日常生活中的应用...")
+                life_text = st.text_area("实例文字说明：", key=f"new_kp_life_{sel_ch}_{i}", height=68, placeholder="例如：微波炉加热食物就是电磁辐射在日常生活中的应用...")
 
                 st.markdown("##### 📷 生活实例配图（可多选）")
-                if f"new_kp_img_list_{i}" not in st.session_state: st.session_state[f"new_kp_img_list_{i}"] = []
-                img_multi = st.file_uploader("选择图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"img_multi_{i}")
+                if f"new_kp_img_list_{sel_ch}_{i}" not in st.session_state: st.session_state[f"new_kp_img_list_{sel_ch}_{i}"] = []
+                img_multi = st.file_uploader("选择图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"img_multi_{sel_ch}_{i}")
                 if st.button("上传所选实例配图", key=f"img_save_{sel_ch}_{i}", disabled=not img_multi):
                     for uf in img_multi:
                         try:
                             ref = upload_file(uf, folder="example-images")
-                            st.session_state[f"new_kp_img_list_{i}"].append(ref)
+                            if ref not in st.session_state[f"new_kp_img_list_{sel_ch}_{i}"]:
+                                st.session_state[f"new_kp_img_list_{sel_ch}_{i}"].append(ref)
                         except Exception as e:
-                            st.error(f"上传失败：{e}")
+                            st.error(f"上传失败：{e}"); st.stop()
                     st.rerun()
-                img_list = st.session_state[f"new_kp_img_list_{i}"]
+                img_list = st.session_state[f"new_kp_img_list_{sel_ch}_{i}"]
                 if img_list:
                     st.caption(f"已上传 {len(img_list)} 张图片：")
                     cols = st.columns(4)
                     for idx, p in enumerate(img_list):
                         with cols[idx % 4]:
                             display_course_image(p, width=100)
-                            if st.button("🗑️", key=f"di_{i}_{idx}"): st.session_state[f"new_kp_img_list_{i}"].pop(idx); st.rerun()
+                            if st.button("🗑️", key=f"di_{sel_ch}_{i}_{idx}"): st.session_state[f"new_kp_img_list_{sel_ch}_{i}"].pop(idx); st.rerun()
 
                 col_vid = st.columns([1])[0]
-                with col_vid: uploaded_video_ex = st.file_uploader("🎬 视频（可选）：", type=["mp4","avi","mov"], key=f"new_kp_vid_{i}")
-                video_path_ex = ""
-                if uploaded_video_ex is not None:
+                with col_vid: uploaded_video_ex = st.file_uploader("🎬 视频（可选）：", type=["mp4","avi","mov"], key=f"new_kp_vid_{sel_ch}_{i}")
+                video_key = f"new_kp_video_{sel_ch}_{i}"
+                video_path_ex = st.session_state.get(video_key, "")
+                if st.button("上传所选视频", key=f"video_save_{sel_ch}_{i}", disabled=uploaded_video_ex is None):
                     try:
                         video_path_ex = upload_file(uploaded_video_ex, folder="videos")
+                        st.session_state[video_key] = video_path_ex
                         st.success("✅ 视频已上传")
                     except Exception as e:
-                        st.error(f"上传失败：{e}")
+                        st.error(f"上传失败：{e}"); st.stop()
 
-                if st.button(f"✅ 确认添加知识点", key=f"new_kp_confirm_{i}", type="primary"):
+                if st.button(f"✅ 确认添加知识点", key=f"new_kp_confirm_{sel_ch}_{i}", type="primary"):
                     examples = []
                     if life_text.strip(): examples.append({"type":"text","content":life_text.strip()})
-                    for ip in st.session_state.get(f"new_kp_img_list_{i}", []): examples.append({"type":"image","content":ip})
+                    for ip in st.session_state.get(f"new_kp_img_list_{sel_ch}_{i}", []): examples.append({"type":"image","content":ip})
                     if video_path_ex: examples.append({"type":"video","content":video_path_ex})
-                    final_think = st.session_state.get(f"new_think_{i}", think_input)
-                    tb_imgs = st.session_state.get(f"new_kp_tb_img_list_{i}", [])
+                    final_think = st.session_state.get(f"new_think_{sel_ch}_{i}", think_input)
+                    tb_imgs = st.session_state.get(f"new_kp_tb_img_list_{sel_ch}_{i}", [])
                     kps.append({"title":kp_title_val,"textbook_content":edited_textbook,"textbook_images":tb_imgs,"selected_examples":examples,"think_question":final_think})
                     save_json(structure, CHAPTER_STRUCTURE_FILE)
-                    for k in [f"new_kp_title_val_{i}",f"new_kp_textbook_{i}",f"new_think_{i}",f"new_kp_img_list_{i}",f"new_kp_tb_img_list_{i}"]: st.session_state.pop(k, None)
+                    for k in [f"new_kp_title_val_{sel_ch}_{i}",f"new_kp_textbook_{sel_ch}_{i}",f"new_think_{sel_ch}_{i}",f"new_kp_img_list_{sel_ch}_{i}",f"new_kp_tb_img_list_{sel_ch}_{i}"]: st.session_state.pop(k, None)
+                    st.session_state.pop(video_key, None)
                     st.success(f"✅ 知识点「{kp_title_val}」已添加！"); st.rerun()
 
             if kps:
                 st.markdown("---"); st.markdown("#### 📌 已有知识点")
                 for j, kp in enumerate(kps):
                     with st.expander(f"📌 {j+1}. {kp['title']}", expanded=False):
-                        edit_title = st.text_input("知识点标题：", kp['title'], key=f"edit_title_{i}_{j}")
+                        edit_title = st.text_input("知识点标题：", kp['title'], key=f"edit_title_{sel_ch}_{i}_{j}")
                         st.markdown("##### 📖 课本内容")
-                        edit_textbook = st.text_area("课本内容：", kp.get('textbook_content',''), height=150, key=f"edit_tb_{i}_{j}", label_visibility="collapsed")
+                        edit_textbook = st.text_area("课本内容：", kp.get('textbook_content',''), height=150, key=f"edit_tb_{sel_ch}_{i}_{j}", label_visibility="collapsed")
                         if st.button(f"🔍 重新检索课本", key=f"re_search_{i}_{j}"):
                             with st.spinner("检索中..."): result = search_and_format_textbook(edit_title or kp['title'], chapter_filter=sel_ch, n_results=4)
-                            st.session_state[f"re_result_{i}_{j}"] = result; st.rerun()
-                        if f"re_result_{i}_{j}" in st.session_state:
-                            st.markdown("📖 **新检索结果：**"); st.text(st.session_state[f"re_result_{i}_{j}"])
+                            st.session_state[f"re_result_{sel_ch}_{i}_{j}"] = result; st.rerun()
+                        if f"re_result_{sel_ch}_{i}_{j}" in st.session_state:
+                            st.markdown("📖 **新检索结果：**"); st.text(st.session_state[f"re_result_{sel_ch}_{i}_{j}"])
                             if st.button("✅ 采用此结果", key=f"use_re_{i}_{j}"):
-                                kp['textbook_content'] = st.session_state.pop(f"re_result_{i}_{j}")
+                                kp['textbook_content'] = st.session_state.pop(f"re_result_{sel_ch}_{i}_{j}")
                                 save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 已更新"); st.rerun()
 
                         st.markdown("##### 🖼️ 课本配图")
@@ -832,27 +844,28 @@ elif role == "👩‍🏫 教师端":
                                 with cols[idx % 4]:
                                     display_course_image(img_path, width=100)
                                     if st.button("🗑️", key=f"del_edit_tb_img_{i}_{j}_{idx}"): tb_images.pop(idx); kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
-                        edit_tb_multi = st.file_uploader("补充课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_tb_multi_{i}_{j}")
+                        edit_tb_multi = st.file_uploader("补充课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_tb_multi_{sel_ch}_{i}_{j}")
                         if st.button("上传补充课本配图", key=f"edit_tb_save_{sel_ch}_{i}_{j}", disabled=not edit_tb_multi):
                             for uf in edit_tb_multi:
                                 try:
                                     ref = upload_file(uf, folder="textbook-images")
-                                    tb_images.append(ref)
+                                    if ref not in tb_images:
+                                        tb_images.append(ref)
                                 except Exception as e:
-                                    st.error(f"上传失败：{e}")
+                                    st.error(f"上传失败：{e}"); st.stop()
                             kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
 
                         st.markdown("##### 🤔 思考题")
-                        if f"edit_think_{i}_{j}" not in st.session_state: st.session_state[f"edit_think_{i}_{j}"] = kp.get('think_question','')
-                        if st.button("🎲 重新生成思考题", key=f"re_gen_btn_{i}_{j}", use_container_width=True):
-                            with st.spinner("生成中..."): st.session_state[f"edit_think_{i}_{j}"] = generate_think_question(edit_title or kp['title'], edit_textbook, sel_ch)
+                        if f"edit_think_{sel_ch}_{i}_{j}" not in st.session_state: st.session_state[f"edit_think_{sel_ch}_{i}_{j}"] = kp.get('think_question','')
+                        if st.button("🎲 重新生成思考题", key=f"re_gen_btn_{sel_ch}_{i}_{j}", use_container_width=True):
+                            with st.spinner("生成中..."): st.session_state[f"edit_think_{sel_ch}_{i}_{j}"] = generate_think_question(edit_title or kp['title'], edit_textbook, sel_ch)
                             st.rerun()
-                        edit_think_input = st.text_area("思考题：", key=f"edit_think_{i}_{j}", placeholder="点击上方按钮重新生成")
+                        edit_think_input = st.text_area("思考题：", key=f"edit_think_{sel_ch}_{i}_{j}", placeholder="点击上方按钮重新生成")
 
                         st.markdown("##### 🌰 生活实例")
-                        current_examples = kp.get('selected_examples', [])
+                        current_examples = kp.setdefault('selected_examples', [])
                         existing_text = "\n".join(e.get('content','') if isinstance(e,dict) else e for e in current_examples if not (isinstance(e,dict) and e.get('type') in ('image','video')))
-                        edit_life = st.text_area("实例文字：", existing_text, height=68, key=f"edit_life_{i}_{j}")
+                        edit_life = st.text_area("实例文字：", existing_text, height=68, key=f"edit_life_{sel_ch}_{i}_{j}")
 
                         st.markdown("##### 📷 生活实例配图")
                         life_images = [e for e in current_examples if isinstance(e,dict) and e.get('type')=='image']
@@ -868,39 +881,43 @@ elif role == "👩‍🏫 教师端":
                             if isinstance(e,dict) and e.get('type')=='video' and e.get('content'): show_video(e['content'])
                         col_eimg, col_evid = st.columns([1,1])
                         with col_eimg:
-                            edit_img_multi = st.file_uploader("补充图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_img_multi_{i}_{j}")
+                            edit_img_multi = st.file_uploader("补充图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_img_multi_{sel_ch}_{i}_{j}")
                             if st.button("上传补充实例配图", key=f"edit_img_save_{sel_ch}_{i}_{j}", disabled=not edit_img_multi):
                                 for uf in edit_img_multi:
                                     try:
                                         ref = upload_file(uf, folder="example-images")
-                                        current_examples.append({"type":"image","content":ref})
+                                        item = {"type":"image","content":ref}
+                                        if item not in current_examples:
+                                            current_examples.append(item)
                                     except Exception as e:
-                                        st.error(f"上传失败：{e}")
+                                        st.error(f"上传失败：{e}"); st.stop()
                                 save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
                         with col_evid:
-                            edit_vid = st.file_uploader("补充视频：", type=["mp4","avi","mov"], key=f"edit_vid_{i}_{j}")
-                            if edit_vid is not None:
+                            edit_vid = st.file_uploader("补充视频：", type=["mp4","avi","mov"], key=f"edit_vid_{sel_ch}_{i}_{j}")
+                            if st.button("上传补充视频", key=f"edit_video_save_{sel_ch}_{i}_{j}", disabled=edit_vid is None):
                                 try:
                                     vp = upload_file(edit_vid, folder="videos")
-                                    current_examples.append({"type":"video","content":vp})
+                                    item = {"type":"video","content":vp}
+                                    if item not in current_examples:
+                                        current_examples.append(item)
                                     save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 视频已添加")
                                 except Exception as e:
-                                    st.error(f"上传失败：{e}")
+                                    st.error(f"上传失败：{e}"); st.stop()
 
                         col_save, col_del = st.columns([2,1])
                         with col_save:
-                            if st.button("💾 保存修改", key=f"save_kp_{i}_{j}"):
+                            if st.button("💾 保存修改", key=f"save_kp_{sel_ch}_{i}_{j}"):
                                 examples = []
                                 if edit_life.strip():
                                     for line in edit_life.strip().split("\n"):
                                         if line.strip(): examples.append({"type":"text","content":line.strip()})
                                 for e in current_examples:
                                     if isinstance(e,dict) and e.get('type') in ('image','video') and e.get('content'): examples.append(e)
-                                final_think = st.session_state.get(f"edit_think_{i}_{j}", edit_think_input)
-                                kp.update({"title":edit_title,"textbook_content":st.session_state.get(f"edit_tb_{i}_{j}",edit_textbook),"textbook_images":tb_images,"selected_examples":examples,"think_question":final_think})
+                                final_think = st.session_state.get(f"edit_think_{sel_ch}_{i}_{j}", edit_think_input)
+                                kp.update({"title":edit_title,"textbook_content":st.session_state.get(f"edit_tb_{sel_ch}_{i}_{j}",edit_textbook),"textbook_images":tb_images,"selected_examples":examples,"think_question":final_think})
                                 save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 已保存"); st.rerun()
                         with col_del:
-                            if st.button("🗑️ 删除", key=f"del_kp_{i}_{j}"): kps.pop(j); save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 已删除"); st.rerun()
+                            if st.button("🗑️ 删除", key=f"del_kp_{sel_ch}_{i}_{j}"): kps.pop(j); save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 已删除"); st.rerun()
 
             if st.button(f"🗑️ 删除本节「{sec['title']}」", key=f"del_sec_{i}"):
                 sections.pop(i); ch_data["sections"] = sections; save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 小节已删除"); st.rerun()
@@ -1048,7 +1065,7 @@ elif role == "👩‍🏫 教师端":
                 papers.append({"chapter":sel,"title":title,"author":author,"abstract":abstract}); save_json(papers, PAPER_FILE); st.success("✅ 已添加"); st.rerun()
         else:
             uploaded_papers = st.file_uploader("上传论文文件（可多选）", type=["pdf","docx","doc","txt"], accept_multiple_files=True, key="paper_files_upload")
-            if uploaded_papers:
+            if st.button("保存所选论文文件", key=f"paper_save_{sel}", disabled=not uploaded_papers):
                 papers = load_json(PAPER_FILE)
                 if not isinstance(papers, list): papers = []
                 existing_names = {p.get("title","") for p in papers if p.get("chapter")==sel}
@@ -1059,7 +1076,7 @@ elif role == "👩‍🏫 教师端":
                         file_ref = upload_file(up, folder="papers")
                         papers.append({"chapter":sel,"title":up.name,"author":"","abstract":"","file_path":file_ref,"is_file":True}); added += 1
                     except Exception as e:
-                        st.error(f"上传失败：{e}")
+                        st.error(f"上传失败：{e}"); st.stop()
                 save_json(papers, PAPER_FILE)
                 if added > 0: st.success(f"✅ 已上传 {added} 篇论文"); st.rerun()
         papers = load_json(PAPER_FILE)
@@ -1083,7 +1100,9 @@ elif role == "👩‍🏫 教师端":
     with tabs[4]:
         st.subheader("🔬 ENVI 实例上传")
         sel = st.selectbox("章节：", all_chapters, key="case_ch")
-        if st.button("📤 上传", key="upload_case_btn") and (ct := st.text_input("标题", key="case_title")) and (ud := st.file_uploader("上传文档/图片/视频", type=["txt","pdf","docx","doc","png","jpg","jpeg","mp4","avi","mov"], key="case_doc")):
+        ct = st.text_input("标题", key="case_title")
+        ud = st.file_uploader("上传文档/图片/视频", type=["txt","pdf","docx","doc","png","jpg","jpeg","mp4","avi","mov"], key="case_doc")
+        if st.button("📤 上传", key="upload_case_btn", disabled=not ct.strip() or ud is None):
             try:
                 fp = upload_file(ud, folder="cases")
             except Exception as e:
