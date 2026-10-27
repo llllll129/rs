@@ -194,6 +194,9 @@ def call_llm(system_prompt, user_content, max_tokens=800):
 
 
 def load_json(path):
+    # 课程结构统一以 GitHub 为准，避免上传后又读到旧的本地记录。
+    if path == CHAPTER_STRUCTURE_FILE:
+        return load_json_from_github(path)[0]
     if not os.path.exists(path):
         return {} if path in [STUDY_LOG_FILE, CHAPTER_STRUCTURE_FILE] else []
     with open(path, "r", encoding="utf-8") as f:
@@ -204,6 +207,8 @@ def load_json(path):
 
 
 def save_json(data, path):
+    if path == CHAPTER_STRUCTURE_FILE:
+        return save_json_to_github(data, path)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -664,12 +669,12 @@ elif role == "👩‍🏫 教师端":
             st.info("📊 暂无框架图")
 
         uploaded_img = st.file_uploader(
-            "上传框架图（图片或Word）",
-            type=["png", "jpg", "jpeg", "docx"],
-            key="fw_upload"
+            "上传框架图（PNG/JPG）",
+            type=["png", "jpg", "jpeg"],
+            key=f"fw_upload_{sel_ch}"
         )
 
-        if uploaded_img:
+        if st.button("保存框架图", key=f"fw_save_{sel_ch}", disabled=uploaded_img is None):
             try:
                 cfg = st.secrets["github_storage"]
                 token = cfg["token"]
@@ -733,8 +738,7 @@ elif role == "👩‍🏫 教师端":
                 st.markdown("##### 🖼️ 课本配图（可多选）")
                 if f"new_kp_tb_img_list_{i}" not in st.session_state: st.session_state[f"new_kp_tb_img_list_{i}"] = []
                 tb_multi = st.file_uploader("选择课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"tb_multi_{i}")
-                if tb_multi and not st.session_state.get(f"tb_done_{i}", False):
-                    st.session_state[f"tb_done_{i}"] = True
+                if st.button("上传所选课本配图", key=f"tb_save_{sel_ch}_{i}", disabled=not tb_multi):
                     for uf in tb_multi:
                         try:
                             ref = upload_file(uf, folder="textbook-images")
@@ -764,8 +768,7 @@ elif role == "👩‍🏫 教师端":
                 st.markdown("##### 📷 生活实例配图（可多选）")
                 if f"new_kp_img_list_{i}" not in st.session_state: st.session_state[f"new_kp_img_list_{i}"] = []
                 img_multi = st.file_uploader("选择图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"img_multi_{i}")
-                if img_multi and not st.session_state.get(f"img_done_{i}", False):
-                    st.session_state[f"img_done_{i}"] = True
+                if st.button("上传所选实例配图", key=f"img_save_{sel_ch}_{i}", disabled=not img_multi):
                     for uf in img_multi:
                         try:
                             ref = upload_file(uf, folder="example-images")
@@ -830,8 +833,7 @@ elif role == "👩‍🏫 教师端":
                                     display_course_image(img_path, width=100)
                                     if st.button("🗑️", key=f"del_edit_tb_img_{i}_{j}_{idx}"): tb_images.pop(idx); kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
                         edit_tb_multi = st.file_uploader("补充课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_tb_multi_{i}_{j}")
-                        if edit_tb_multi and not st.session_state.get(f"edit_tb_done_{i}_{j}", False):
-                            st.session_state[f"edit_tb_done_{i}_{j}"] = True
+                        if st.button("上传补充课本配图", key=f"edit_tb_save_{sel_ch}_{i}_{j}", disabled=not edit_tb_multi):
                             for uf in edit_tb_multi:
                                 try:
                                     ref = upload_file(uf, folder="textbook-images")
@@ -867,8 +869,7 @@ elif role == "👩‍🏫 教师端":
                         col_eimg, col_evid = st.columns([1,1])
                         with col_eimg:
                             edit_img_multi = st.file_uploader("补充图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_img_multi_{i}_{j}")
-                            if edit_img_multi and not st.session_state.get(f"edit_img_done_{i}_{j}", False):
-                                st.session_state[f"edit_img_done_{i}_{j}"] = True
+                            if st.button("上传补充实例配图", key=f"edit_img_save_{sel_ch}_{i}_{j}", disabled=not edit_img_multi):
                                 for uf in edit_img_multi:
                                     try:
                                         ref = upload_file(uf, folder="example-images")

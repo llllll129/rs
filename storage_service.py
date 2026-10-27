@@ -1,5 +1,7 @@
 
 import os
+from pathlib import Path
+from urllib.parse import urlparse, unquote, quote
 import base64
 import uuid
 import json
@@ -24,11 +26,7 @@ def github_request(method, path, **kwargs):
     response = requests.request(
         method, url, headers=headers, timeout=30, **kwargs
     )
-    if not response.ok:
-        raise RuntimeError(
-        f"GitHub API 请求失败：HTTP {response.status_code}；"
-        f"详情：{response.text[:500]}"
-    )
+    response.raise_for_status()
     return response.json()
 
 
@@ -44,10 +42,10 @@ def upload_file(uploaded_file, folder="images", token=None, repo=None):
 
     repo_url = f"https://api.github.com/repos/{repo}"
     repo_resp = requests.get(repo_url, headers=headers, timeout=15)
-    if not resp.ok:
+    if not repo_resp.ok:
         raise RuntimeError(
-        f"GitHub 上传失败，状态码：{resp.status_code}；"
-        f"原因：{resp.text}"
+        f"GitHub 上传失败，状态码：{repo_resp.status_code}；"
+        f"原因：{repo_resp.text}"
     )
     branch = repo_resp.json()["default_branch"]
 
@@ -70,7 +68,7 @@ def upload_file(uploaded_file, folder="images", token=None, repo=None):
     )
     response.raise_for_status()
 
-    return f"https://raw.githubusercontent.com/{repo}/{branch}/{filename}"
+    return f'https://raw.githubusercontent.com/{repo}/{quote(branch, safe="")}/{filename}'
 
 
 def load_json_from_github(path="chapter_structure.json"):
@@ -123,30 +121,51 @@ def save_json_to_github(data, path="chapter_structure.json"):
 
 
 def download_file(file_ref):
-    import requests
-
+    """读取远程文件或项目内旧文件；缺失的原文件不能由代码恢复。"""
     if not isinstance(file_ref, str) or not file_ref.strip():
         return None
-
     file_ref = file_ref.strip()
-
     if not file_ref.startswith(("https://", "http://")):
-        return None
-
+        # 兼容 Windows 旧路径；限制读取范围在项目内。
+        root = Path(__file__).resolve().parent
+        target = (root / file_ref.replace(chr(92), "/")).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("文件路径必须位于项目目录内")
+        return target.read_bytes() if target.is_file() else None
+    parsed = urlparse(file_ref)
+    if parsed.hostname == "raw.githubusercontent.com":
+        # 对配置的图片仓库通过认证 API 下载，兼容私有仓库。
+        try:
+            token, repo = get_github_config()
+        except (KeyError, FileNotFoundError):
+            token, repo = None, None
+        prefix = f"/{repo}/" if repo else None
+        if prefix and parsed.path.startswith(prefix):
+            branch, sep, path = parsed.path[len(prefix):].partition("/")
+            if sep:
+                response = requests.get(
+                    f"https://api.github.com/repos/{repo}/contents/{path}",
+                    headers={"Authorization": f"Bearer {token}",
+                             "Accept": "application/vnd.github.raw+json"},
+                    params={"ref": unquote(branch)}, timeout=20,
+                )
+                response.raise_for_status()
+                return response.content
     response = requests.get(file_ref, timeout=20)
     response.raise_for_status()
     return response.content
 
 
 def show_image(file_ref, **kwargs):
-    import streamlit as st
+    try:
+        image_data = download_file(file_ref)
+        if image_data is None:
+            st.warning("找不到图片原文件，请检查是否已提交到仓库；缺失文件需从备份恢复。")
+        else:
+            st.image(image_data, **kwargs)
+    except (requests.RequestException, OSError, ValueError) as exc:
+        st.warning(f"图片读取失败（{type(exc).__name__}），请检查路径、仓库权限或网络。")
 
-    image_data = download_file(file_ref)
-
-    if image_data is not None:
-        st.image(image_data, **kwargs)
-    else:
-        st.warning("这张图片还没有有效的网络地址，请重新上传。")
 
 def display_course_image(file_ref, **kwargs):
     if file_ref:
