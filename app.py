@@ -157,6 +157,16 @@ def chapter_label(chapter):
     return _COURSE_LABELS.get(chapter, chapter)
 
 
+def section_label(chapter, title):
+    """小节显示号跟随课程章号，保留原小节标题供资料关联。"""
+    original = re.match(r"^第(\d+)章", chapter)
+    displayed = re.match(r"^第(\d+)章", chapter_label(chapter))
+    if not original or not displayed:
+        return title
+    pattern = r"^(\s*(?:§\s*)?)" + re.escape(original.group(1)) + r"(?=[.．]\d)"
+    return re.sub(pattern, lambda match: match.group(1) + displayed.group(1), title, count=1)
+
+
 def chapter_options(options):
     order = {chapter: index for index, chapter in enumerate(_COURSE_LABELS)}
     return sorted(options, key=lambda c: (-1 if c == "全部" else order.get(c, len(order)), chapter_order_key(c)))
@@ -479,7 +489,7 @@ if role == "👨‍🎓 学生端":
                     if current_idx >= total: st.info("已是最后一个知识点")
                     else:
                         kp = all_kps[current_idx]
-                        st.caption(f"📖 {chapter_label(sel_ch)} > {kp['section_title']}")
+                        st.caption(f"📖 {chapter_label(sel_ch)} > {section_label(sel_ch, kp['section_title'])}")
                         st.markdown(f"""<div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:10px 18px;border-radius:10px;color:white;margin-bottom:12px"><span style="font-size:1.1em;font-weight:bold">🔹 {kp['kp_title']}</span></div>""", unsafe_allow_html=True)
                         progress_val = min(learned_count / total, 1.0) if total > 0 else 0.0
                         st.progress(progress_val, text=f"学习进度 {min(learned_count, total)}/{total}（{min(pct, 100)}%）")
@@ -773,7 +783,7 @@ elif role == "👩‍🏫 教师端":
             st.success(f"✅ 小节「{new_sec_title}」已添加")
             st.rerun()
         for i, sec in enumerate(sections):
-            st.markdown("---"); st.markdown(f"### 📖 {sec['title']}（{len(sec.get('knowledge_points', []))}个知识点）")
+            st.markdown("---"); st.markdown(f"### 📖 {section_label(sel_ch, sec['title'])}（{len(sec.get('knowledge_points', []))}个知识点）")
             kps = sec.get("knowledge_points", [])
 
             st.markdown("#### ➕ 添加新知识点")
@@ -967,7 +977,7 @@ elif role == "👩‍🏫 教师端":
                         with col_del:
                             if st.button("🗑️ 删除", key=f"del_kp_{sel_ch}_{i}_{j}"): kps.pop(j); save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 已删除"); st.rerun()
 
-            if st.button(f"🗑️ 删除本节「{sec['title']}」", key=f"del_sec_{i}"):
+            if st.button(f"🗑️ 删除本节「{section_label(sel_ch, sec['title'])}」", key=f"del_sec_{i}"):
                 sections.pop(i); ch_data["sections"] = sections; save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 小节已删除"); st.rerun()
     with tabs[1]:
         st.subheader("📋 课堂问答管理")
