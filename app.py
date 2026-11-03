@@ -138,15 +138,32 @@ def init():
 model, collection, llm = init()
 
 
+def chapter_order_key(chapter):
+    match = re.match(r"^第(\d+)章", str(chapter))
+    return (int(match.group(1)) if match else 1000000, str(chapter))
+
+
+def configure_chapter_labels(structure):
+    # 仅重排课程显示编号；保留原标识供教材检索、资料和历史记录关联。
+    global _COURSE_LABELS
+    ordered = sorted(structure, key=chapter_order_key)
+    _COURSE_LABELS = {
+        chapter: re.sub(r"^第\d+章", f"第{index}章", chapter)
+        for index, chapter in enumerate(ordered, 1)
+    }
+
+
+def chapter_label(chapter):
+    return _COURSE_LABELS.get(chapter, chapter)
+
+
+def chapter_options(options):
+    order = {chapter: index for index, chapter in enumerate(_COURSE_LABELS)}
+    return sorted(options, key=lambda c: (-1 if c == "全部" else order.get(c, len(order)), chapter_order_key(c)))
+
+
 def get_all_chapters():
-    results = collection.get()
-    chapters = set()
-    for meta in results["metadatas"]:
-        chapters.add(meta.get("chapter", "未知"))
-    structure = load_json(CHAPTER_STRUCTURE_FILE)
-    if structure:
-        chapters.update(structure.keys())
-    return sorted(chapters)
+    return list(_COURSE_LABELS)
 
 
 def search_textbook(keywords, chapter_filter=None, n_results=3):
@@ -375,6 +392,9 @@ def analyze_logs_by_type(log_type):
                     records.append(r)
     return records
 
+# 每次运行按已搭建课程生成显示编号，避免按字符串把第10章排在第2章前。
+configure_chapter_labels(load_json(CHAPTER_STRUCTURE_FILE))
+
 # ==================== 页面 ====================
 if "role" not in st.session_state:
     st.session_state.role = "👨‍🎓 学生端"
@@ -421,7 +441,7 @@ if role == "👨‍🎓 学生端":
         structure = load_json(CHAPTER_STRUCTURE_FILE)
         if not structure: st.info("📭 老师暂未搭建章节结构")
         else:
-            sel_ch = st.selectbox("📖 选择章节：", list(structure.keys()), key="ch_sel", label_visibility="collapsed")
+            sel_ch = st.selectbox("📖 选择章节：", chapter_options(list(structure.keys())), key="ch_sel", label_visibility="collapsed", format_func=chapter_label)
             ch_data = structure[sel_ch]
             all_kps = []
             for si, sec in enumerate(ch_data.get("sections", [])):
@@ -459,7 +479,7 @@ if role == "👨‍🎓 学生端":
                     if current_idx >= total: st.info("已是最后一个知识点")
                     else:
                         kp = all_kps[current_idx]
-                        st.caption(f"📖 {sel_ch} > {kp['section_title']}")
+                        st.caption(f"📖 {chapter_label(sel_ch)} > {kp['section_title']}")
                         st.markdown(f"""<div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:10px 18px;border-radius:10px;color:white;margin-bottom:12px"><span style="font-size:1.1em;font-weight:bold">🔹 {kp['kp_title']}</span></div>""", unsafe_allow_html=True)
                         progress_val = min(learned_count / total, 1.0) if total > 0 else 0.0
                         st.progress(progress_val, text=f"学习进度 {min(learned_count, total)}/{total}（{min(pct, 100)}%）")
@@ -516,7 +536,7 @@ if role == "👨‍🎓 学生端":
         if not isinstance(class_qa, list) or not class_qa: st.info("📭 暂无")
         else:
             qa_chapters = list(set(q["chapter"] for q in class_qa))
-            sel_qa_ch = st.selectbox("选择章节：", qa_chapters, key="student_qa_ch")
+            sel_qa_ch = st.selectbox("选择章节：", chapter_options(qa_chapters), key="student_qa_ch", format_func=chapter_label)
             filtered_qa = [q for q in class_qa if q["chapter"] == sel_qa_ch]
             pre_qa = [q for q in filtered_qa if q.get('type') == '课前预习检测']
             mid_qa = [q for q in filtered_qa if q.get('type') == '课中随堂检测']
@@ -580,12 +600,12 @@ if role == "👨‍🎓 学生端":
                 total_kps = sum(len(sec.get("knowledge_points", [])) for sec in ch_data.get("sections", []))
                 can = (total_kps == 0) or (len(my_log.get(ch, {}).get("learned", [])) >= total_kps)
                 q_type_info = q.get("q_type", "混合")
-                names.append(f"{ch}（{q_type_info}，{len(q['questions'])}题）{'✅' if can else '🔒'}"); available.append((q, can))
+                names.append(f"{chapter_label(ch)}（{q_type_info}，{len(q['questions'])}题）{'✅' if can else '🔒'}"); available.append((q, can))
             sel_idx = st.selectbox("选择检测：", range(len(names)), format_func=lambda i: names[i])
             quiz, can = available[sel_idx]
             if not can: st.warning("🔒 请先完成学习")
             else:
-                st.markdown(f"### {quiz['chapter']} 章节检测")
+                st.markdown(f"### {chapter_label(quiz['chapter'])} 章节检测")
                 for i, qi in enumerate(quiz["questions"]):
                     q_type = qi.get("q_type", "简答题")
                     st.markdown(f"**第{i+1}题**（{q_type}）：{qi['question']}")
@@ -621,7 +641,7 @@ if role == "👨‍🎓 学生端":
         if not isinstance(papers, list) or not papers: st.info("暂无")
         else:
             chapters = list(set(p["chapter"] for p in papers))
-            sel = st.selectbox("章节：", chapters)
+            sel = st.selectbox("章节：", chapter_options(chapters), format_func=chapter_label)
             for idx, p in enumerate(papers):
                 if p["chapter"] == sel:
                     if p.get("is_file"):
@@ -635,7 +655,7 @@ if role == "👨‍🎓 学生端":
         cases = load_json(CASE_FILE)
         if not isinstance(cases, list) or not cases: st.info("暂无")
         else:
-            sel = st.selectbox("章节：", list(set(c["chapter"] for c in cases)))
+            sel = st.selectbox("章节：", chapter_options(list(set(c["chapter"] for c in cases))), format_func=chapter_label)
             for c in cases:
                 if c["chapter"] == sel:
                     with st.expander(f"📁 {c['title']}"):
@@ -655,7 +675,7 @@ if role == "👨‍🎓 学生端":
 
     elif active == 5:
         st.subheader("💬 操作求助")
-        sel_ch = st.selectbox("章节：", get_all_chapters()); q = st.text_area("描述问题：", height=120)
+        sel_ch = st.selectbox("章节：", chapter_options(get_all_chapters()), format_func=chapter_label); q = st.text_area("描述问题：", height=120)
         uf = st.file_uploader("上传截图", type=["png","jpg","jpeg"])
         if st.button("📤 提交") and q:
             sp = None
@@ -695,11 +715,7 @@ elif role == "👩‍🏫 教师端":
         col_ch, col_del = st.columns([4, 1])
 
         with col_ch:
-            sel_ch = st.selectbox(
-                "选择章节：",
-                built + ["➕ 新建章节"],
-                key="struct_ch"
-            )
+            sel_ch = st.selectbox("选择章节：", chapter_options(built + ["➕ 新建章节"]), key="struct_ch", format_func=chapter_label)
 
         with col_del:
             if sel_ch != "➕ 新建章节" and st.button(
@@ -715,11 +731,7 @@ elif role == "👩‍🏫 教师端":
             remaining = [c for c in all_chapters if c not in built]
 
             if remaining:
-                new_ch = st.selectbox(
-                    "选择未创建的章节：",
-                    remaining,
-                    key="new_ch"
-                )
+                new_ch = st.selectbox("选择未创建的章节：", chapter_options(remaining), key="new_ch", format_func=chapter_label)
             else:
                 new_ch = st.text_input(
                     "所有章节已创建，手动输入新章节名：",
@@ -961,7 +973,7 @@ elif role == "👩‍🏫 教师端":
         st.subheader("📋 课堂问答管理")
         class_qa = load_json(CLASS_QA_FILE)
         if not isinstance(class_qa, list): class_qa = []
-        qa_chapter = st.selectbox("选择章节：", all_chapters, key="class_qa_ch")
+        qa_chapter = st.selectbox("选择章节：", chapter_options(all_chapters), key="class_qa_ch", format_func=chapter_label)
         qa_question_type = st.selectbox("题目类型：", ["简答题","选择题","填空题"], key="class_qa_qtype")
         qa_type = st.radio("检测类型：", ["课前预习检测","课中随堂检测"], key="class_qa_type")
         qa_knowledge = st.text_input("关联知识点（用于AI出题）：", key="class_qa_knowledge", placeholder="例如：普朗克辐射定律")
@@ -1006,7 +1018,7 @@ elif role == "👩‍🏫 教师端":
         if class_qa:
             st.markdown("---"); st.markdown("### 📋 已发布问题")
             all_qa_chapters = list(set(item.get('chapter','未知') for item in class_qa))
-            selected_qa_chapter = st.selectbox("筛选章节：", ["全部"] + all_qa_chapters, key="qa_filter_chapter")
+            selected_qa_chapter = st.selectbox("筛选章节：", chapter_options(["全部"] + all_qa_chapters), key="qa_filter_chapter", format_func=chapter_label)
             filtered_qa = class_qa if selected_qa_chapter == "全部" else [item for item in class_qa if item.get('chapter') == selected_qa_chapter]
             chapter_dict = {}
             for item in filtered_qa:
@@ -1026,7 +1038,7 @@ elif role == "👩‍🏫 教师端":
 
     with tabs[2]:
         st.subheader("发布章节检测")
-        sel = st.selectbox("章节：", all_chapters, key="quiz_ch")
+        sel = st.selectbox("章节：", chapter_options(all_chapters), key="quiz_ch", format_func=chapter_label)
         st.markdown("#### 设置各题型数量")
         col1, col2, col3 = st.columns(3)
         with col1: choice_count = st.number_input("选择题数量", min_value=0, max_value=10, value=2, key="quiz_choice")
@@ -1083,13 +1095,13 @@ elif role == "👩‍🏫 教师端":
         if isinstance(quizzes, list) and quizzes:
             st.markdown("---"); st.markdown("### 📋 已发布检测")
             for idx, qz in enumerate(quizzes):
-                with st.expander(f"{qz['chapter']}（{qz.get('q_type','混合')}，{len(qz['questions'])}题）"):
+                with st.expander(f"{chapter_label(qz['chapter'])}（{qz.get('q_type','混合')}，{len(qz['questions'])}题）"):
                     for i, qi in enumerate(qz['questions']): st.write(f"**{i+1}**（{qi.get('q_type','')}）{qi['question']}")
                     if st.button(f"🗑️ 删除此检测", key=f"del_quiz_{idx}"): quizzes.pop(idx); save_json(quizzes, QUIZ_FILE); st.success("🗑️ 已删除"); st.rerun()
 
     with tabs[3]:
         st.subheader("论文推荐")
-        sel = st.selectbox("章节：", all_chapters, key="paper_ch")
+        sel = st.selectbox("章节：", chapter_options(all_chapters), key="paper_ch", format_func=chapter_label)
         paper_mode = st.radio("添加方式：", ["手动输入","上传文件"], key="paper_mode", horizontal=True)
         if paper_mode == "手动输入":
             title = st.text_input("标题", key="paper_title")
@@ -1144,7 +1156,7 @@ elif role == "👩‍🏫 教师端":
 
     with tabs[4]:
         st.subheader("🔬 ENVI 实例上传")
-        sel = st.selectbox("章节：", all_chapters, key="case_ch")
+        sel = st.selectbox("章节：", chapter_options(all_chapters), key="case_ch", format_func=chapter_label)
         ct = st.text_input("标题", key="case_title")
         ud = st.file_uploader("上传文档/图片/视频", type=["txt","pdf","docx","doc","png","jpg","jpeg","mp4","avi","mov"], key="case_doc")
         if st.button("📤 上传", key="upload_case_btn", disabled=not ct.strip() or ud is None):
@@ -1181,7 +1193,7 @@ elif role == "👩‍🏫 教师端":
     with tabs[6]:
         st.subheader("📊 学情总览")
         structure = load_json(CHAPTER_STRUCTURE_FILE)
-        view_ch = st.selectbox("选择章节：", list(structure.keys()), key="overview_ch")
+        view_ch = st.selectbox("选择章节：", chapter_options(list(structure.keys())), key="overview_ch", format_func=chapter_label)
         ch_data = structure.get(view_ch, {})
         total_kps = sum(len(sec.get("knowledge_points",[])) for sec in ch_data.get("sections",[]))
         filter_col1, _ = st.columns([1,3])
