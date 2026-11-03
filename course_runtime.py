@@ -2,6 +2,10 @@
 import hashlib
 import json
 import math
+import time
+from threading import BoundedSemaphore
+
+_AI_GATE = BoundedSemaphore(1)
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -28,24 +32,72 @@ def api_error_message(exc):
              403:'当前密钥或账户无权调用该模型。',
              404:'模型或接口地址不存在，请检查 ai.model 和 ai.base_url。',
              429:'服务繁忙或达到调用限额，请稍后重试。'}
-    hint = hints.get(status, '服务暂不可用，请稍后重试。')
+    business_hints = {
+        '1302': '账户请求速率受限，请减少同时调用并稍后重试。',
+        '1305': '智谱当前模型访问量过大，请稍后再试；这不是图片存储配置错误。',
+        '1113': '服务账户已欠费，请在服务控制台核查。',
+        '1308': '账户已达到使用上限，请等待服务返回的重置时间。',
+        '1310': '账户达到每周或每月使用上限，请核查服务控制台。',
+    }
+    hint = business_hints.get(code, hints.get(status, '服务暂不可用，请稍后重试。'))
     return f'AI 请求未完成（{detail}）：{hint} 原内容和未提交的回答仍保留，可重试。'
 
 
-def request_text(client, model, system_prompt, user_content, max_tokens=800):
+def _transient_ai_error(exc):
+    status = getattr(exc, 'status_code', None)
+    body = getattr(exc, 'body', None)
+    error = body.get('error', body) if isinstance(body, dict) else {}
+    code = str(error.get('code', '')) if isinstance(error, dict) else ''
+    # 不把欠费、周期配额或权限错误当成瞬时拥堵反复调用。
+    return (status == 429 and code in {'1302','1303','1305','1312'}) or (status in {500,502,503,504} and not code)
+
+
+def _retry_delay(exc, fallback):
+    headers = getattr(getattr(exc, 'response', None), 'headers', {})
+    value = headers.get('retry-after') if hasattr(headers, 'get') else None
     try:
-        response = client.chat.completions.create(
-            model=model, messages=[{'role':'system','content':system_prompt},
-                                   {'role':'user','content':user_content}],
-            temperature=0.3, max_tokens=max_tokens,
-        )
-    except Exception as exc:
-        raise AIRequestFailure(api_error_message(exc)) from None
-    choices = getattr(response, 'choices', None)
-    text = getattr(getattr(choices[0], 'message', None), 'content', None) if choices else None
-    if not isinstance(text, str) or not text.strip():
-        raise AIRequestFailure('模型没有返回可用正文，本次未更新内容。请重试；持续发生时检查模型配置和输出长度。')
-    return text.strip()
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds > 8:
+            return None
+        if math.isfinite(seconds) and seconds >= 0:
+            return max(fallback, seconds)
+    except (TypeError,ValueError):
+        pass
+    return fallback
+
+
+def request_text(client, model, system_prompt, user_content, max_tokens=800):
+    # 单进程内串行处理，不同账号/模型的外部全局限额仍由服务商决定。
+    if not _AI_GATE.acquire(timeout=15):
+        raise AIRequestFailure('当前应用的 AI 请求正在排队，请稍后重试；原内容仍保留。')
+    try:
+        options = getattr(client, 'with_options', None)
+        # 只保留这一层重试，避免与 SDK 的自动重试叠加。
+        request_client = options(max_retries=0) if callable(options) else client
+        for attempt in range(3):
+            try:
+                response = request_client.chat.completions.create(
+                    model=model, messages=[{'role':'system','content':system_prompt},
+                                           {'role':'user','content':user_content}],
+                    temperature=0.3, max_tokens=max_tokens,
+                )
+                break
+            except Exception as exc:
+                if attempt < 2 and _transient_ai_error(exc):
+                    delay = _retry_delay(exc, (2,5)[attempt])
+                    if delay is None:
+                        raise AIRequestFailure(api_error_message(exc) + ' 服务要求较长冷却时间，本次不继续自动请求。') from None
+                    time.sleep(delay)
+                    continue
+                suffix = f' 已自动重试 {attempt} 次，仍未完成，请稍后再试。' if attempt else ''
+                raise AIRequestFailure(api_error_message(exc) + suffix) from None
+        choices = getattr(response, 'choices', None)
+        text = getattr(getattr(choices[0], 'message', None), 'content', None) if choices else None
+        if not isinstance(text, str) or not text.strip():
+            raise AIRequestFailure('模型没有返回可用正文，本次未更新内容。请重试；持续发生时检查模型配置和输出长度。')
+        return text.strip()
+    finally:
+        _AI_GATE.release()
 
 
 def question_id(data):
@@ -149,3 +201,4 @@ def score_icon(record):
 
 def course_now():
     return datetime.now(ZoneInfo('Asia/Shanghai'))
+
