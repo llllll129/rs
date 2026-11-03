@@ -2,6 +2,9 @@ import os
 import json
 import re
 from datetime import datetime
+from html import escape
+from course_runtime import (AIRequestFailure, request_text, api_error_message, question_id,
+    course_now, parse_score, numeric_score, score_label, score_icon, grade_objective, deadline_passed, parse_quiz_text)
 
 import numpy as np
 import streamlit as st
@@ -41,14 +44,13 @@ BASE_URL = get_secret(
     "ai", "base_url", "https://open.bigmodel.cn/api/paas/v4"
 )
 MODEL_NAME = get_secret("ai", "model", "glm-4.7-flash")
-TEACHER_PASSWORD = get_secret("auth", "teacher_password", "rs2026")
+TEACHER_PASSWORD = get_secret("auth", "teacher_password")
 
 
 if not API_KEY:
     st.error("尚未配置 AI API 密钥，请联系管理员。")
     st.stop()
 
-llm = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 LOG_FILE = "learning_log.jsonl"
 QUIZ_FILE = "quiz_tasks.json"
@@ -78,7 +80,8 @@ st.markdown("""
 
 
 @st.cache_resource
-def init():
+def init(api_key, base_url):
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=45.0, max_retries=1)
     import zipfile
     import base64
 
@@ -99,11 +102,13 @@ def init():
         def get(self):
             return {"metadatas": self.data["metadatas"]}
 
-        def query(self, query_embeddings, n_results=20):
+        def query(self, query_embeddings, n_results=20, chapter_filter=None):
             results = {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
             query_vec = np.array(query_embeddings[0])
             scored = []
             for i, emb_b64 in enumerate(self.data["embeddings"]):
+                if chapter_filter and self.data["metadatas"][i].get("chapter") != chapter_filter:
+                    continue
                 emb = np.frombuffer(base64.b64decode(emb_b64), dtype=np.float32)
                 similarity = np.dot(query_vec, emb) / (np.linalg.norm(query_vec) * np.linalg.norm(emb) + 1e-10)
                 scored.append((similarity, i))
@@ -124,18 +129,18 @@ def init():
             embeddings = []
             for text in texts:
                 try:
-                    resp = llm.embeddings.create(model="embedding-3", input=text)
+                    resp = client.embeddings.create(model="embedding-3", input=text)
                     embeddings.append(resp.data[0].embedding)
                 except Exception as e:
-                    st.error(f"Embedding 调用失败：{e}")
-                    raise
+                    st.error(api_error_message(e))
+                    st.stop()
             return np.array(embeddings)
 
     model = ZhipuEmbedding()
 
-    return model, collection, llm
+    return model, collection, client
 
-model, collection, llm = init()
+model, collection, llm = init(API_KEY, BASE_URL)
 
 
 def chapter_order_key(chapter):
@@ -177,25 +182,22 @@ def get_all_chapters():
 
 
 def search_textbook(keywords, chapter_filter=None, n_results=3):
+    if not str(keywords).strip():
+        return []
     embedding = model.encode(keywords).tolist()
-    if chapter_filter:
-        results = collection.query(query_embeddings=embedding, n_results=20)
-        docs = []
-        for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-            if meta.get("chapter") == chapter_filter and len(doc.strip()) > 50:
-                docs.append(doc)
-            if len(docs) >= n_results:
-                break
-        return docs[:n_results]
-    else:
-        results = collection.query(query_embeddings=embedding, n_results=n_results)
-        return [d for d in results["documents"][0] if len(d.strip()) > 50]
+    try:
+        results = collection.query(query_embeddings=embedding, n_results=max(n_results, 20), chapter_filter=chapter_filter)
+    except (ValueError, IndexError, KeyError):
+        st.error("教材知识库向量或索引不兼容，未生成回答。请核对嵌入模型与知识库版本。")
+        st.stop()
+    return [doc for doc in results["documents"][0] if isinstance(doc,str) and len(doc.strip()) > 50][:n_results]
 
 
 def search_and_format_textbook(keywords, chapter_filter=None, n_results=4):
     docs = search_textbook(keywords, chapter_filter=chapter_filter, n_results=n_results)
     if not docs:
-        return f"⚠️ 本章节未检索到与「{keywords}」相关的内容，请确认知识点名称或换个说法。"
+        st.warning(f"本章节未检索到与「{keywords}」相关的内容，请确认知识点名称或换个说法。")
+        st.stop()
     raw_text = "\n\n".join(docs)
     sp = f"""你是遥感课程教材编辑。请根据课本原文，解释【{keywords}】这个知识点。
 输出要求：
@@ -209,16 +211,22 @@ def search_and_format_textbook(keywords, chapter_filter=None, n_results=4):
 
 
 def call_llm(system_prompt, user_content, max_tokens=800):
-    response = llm.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content}
-        ],
-        temperature=0.3,
-        max_tokens=max_tokens
-    )
-    return response.choices[0].message.content
+    try:
+        return request_text(llm, MODEL_NAME, system_prompt, user_content, max_tokens)
+    except AIRequestFailure as exc:
+        st.error(str(exc))
+        st.stop()
+
+
+def stage_widget_value(key, value):
+    # 在下一次运行、控件实例化之前赋值，避免覆盖已实例化的控件状态。
+    pending = st.session_state.setdefault("_pending_widget_values", {})
+    pending[key] = value
+
+
+def apply_pending_widget_values():
+    for key, value in st.session_state.pop("_pending_widget_values", {}).items():
+        st.session_state[key] = value
 
 
 # 图片对应的课程、案例和论文索引统一持久化；学生个人记录不写入公开仓库。
@@ -252,8 +260,38 @@ def save_json(data, path):
         except StorageError as exc:
             st.error(str(exc))
             st.stop()
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    import tempfile
+    destination = os.path.abspath(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(destination), delete=False) as f:
+            temporary = f.name
+            json.dump(data, f, ensure_ascii=False, indent=2, allow_nan=False)
+        os.replace(temporary, destination)
+    except (OSError, ValueError):
+        if temporary and os.path.exists(temporary):
+            os.remove(temporary)
+        st.error("本地记录未保存成功，原记录仍保留，请重试或检查存储空间。")
+        st.stop()
+
+
+def render_case_file(case, key_prefix):
+    try:
+        data = download_bytes(case.get("file_path", ""))
+    except (StorageError, OSError):
+        st.info("案例原文件暂不可下载，请联系教师补充文件。")
+        return
+    name = case.get("original_filename") or os.path.basename(str(case.get("file_path", "case")).replace(chr(92), "/").split("?")[0])
+    st.download_button("📥 下载案例文件", data, file_name=name, key=f"{key_prefix}_download")
+    if name.lower().endswith(".txt"):
+        st.text(data.decode("utf-8", errors="replace"))
+    elif name.lower().endswith(".docx"):
+        try:
+            from docx import Document
+            import io
+            st.text("\n".join(p.text for p in Document(io.BytesIO(data)).paragraphs))
+        except Exception:
+            st.caption("此案例可下载后查看。")
 
 
 def render_paper_file(paper, key_prefix):
@@ -337,11 +375,14 @@ def render_framework_editor(chapter, chapter_data):
 
 
 def generate_think_question(kp_title, textbook_content, chapter):
+    if not str(kp_title).strip() or not str(textbook_content).strip():
+        st.warning("请先填写知识点标题和教材内容，再生成思考题。")
+        st.stop()
     sp = """你是遥感课程教师。请根据该知识点的课本内容，出一道深层次的思考题。
 要求：1. 不要简单重复概念，要引导学生深入理解原理
 2. 可以结合实际应用场景提问 3. 可以让学生推导或解释某个现象的本质原因
 4. 只输出题目本身，1-2句话，不要加任何前缀"""
-    return call_llm(sp, f"【章节】{chapter}\n【知识点】{kp_title}\n【课本内容】\n{textbook_content}", max_tokens=200)
+    return call_llm(sp, f"【章节】{chapter}\n【知识点】{kp_title}\n【课本内容】\n{textbook_content}", max_tokens=1024)
 
 
 def evaluate_think_answer(question, student_answer, chapter):
@@ -351,6 +392,9 @@ def evaluate_think_answer(question, student_answer, chapter):
 
 def generate_quiz_questions(chapter, question_type, count=3):
     context = "\n".join(search_textbook(f"{chapter} 核心知识点", chapter_filter=chapter, n_results=10))
+    if not context.strip():
+        st.warning("未检索到本章节的教材依据，请检查知识库后再出题。")
+        st.stop()
     if question_type == "选择题":
         sp = f"""生成{count}道单选题，考察对概念的理解和应用能力，非简单记忆。
 要求：1. 选项要有干扰性 2. 难度适中偏难 3. 格式：题目N：xxx\nA. xxx  B. xxx  C. xxx  D. xxx\n答案：X（正确选项字母）\n正确选项内容：xxx\n解析：xxx"""
@@ -364,30 +408,58 @@ def generate_quiz_questions(chapter, question_type, count=3):
 
 
 def auto_grade_quiz(question, correct_answer, student_answer, q_type):
-    if q_type == "选择题":
-        correct = correct_answer.strip()[0].upper()
-        student = student_answer.strip().upper()
-        return (100, "正确") if correct == student else (0, "错误")
-    elif q_type == "填空题":
-        return (100, "正确") if student_answer.strip() == correct_answer.strip() else (60, f"部分正确，参考答案：{correct_answer}")
-    else:
-        result = call_llm("评判简答题，输出：【得分】XX分\n【评价】XXX",
-                          f"【参考答案】\n{correct_answer}\n\n【学生答案】\n{student_answer}", max_tokens=300)
-        score = 60
-        for line in result.split("\n"):
-            if "【得分】" in line:
-                try:
-                    score = int(line.split("【得分】")[1].split("分")[0].strip())
-                except:
-                    pass
-        return score, result
+    if q_type in ("选择题", "填空题"):
+        return grade_objective(question, correct_answer, student_answer, q_type)
+    if not str(student_answer).strip():
+        return None, "回答为空，尚未评分。"
+    if not str(correct_answer or '').strip() or correct_answer == "教师未提供参考答案":
+        return None, "缺少教师参考答案，待教师复核。"
+    result = call_llm("评判简答题，按参考答案评阅，输出：【得分】XX分\n【评价】XXX",
+                      f"【参考答案】\n{correct_answer}\n\n【学生答案】\n{student_answer}", max_tokens=800)
+    score = parse_score(result)
+    return score, result if score is not None else "未获得有效评分，待教师复核。\n" + result
 
 
 def log_interaction(log_type, data):
-    data["timestamp"] = datetime.now().isoformat()
+    data["timestamp"] = course_now().isoformat()
     data["log_type"] = log_type
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def update_log_score(timestamp, score):
+    """教师明确保存后才更新一条评分，其他原始日志行保持不动。"""
+    if not timestamp or not isinstance(score, (int,float)) or not 0 <= score <= 100:
+        st.error("评分或记录标识无效，未修改日志。")
+        st.stop()
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    changed = []
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record,dict) and record.get("timestamp") == timestamp:
+            changed.append((index,record))
+    if len(changed) != 1:
+        st.error("无法唯一定位原记录，未修改日志，请下载原日志核查。")
+        st.stop()
+    index, record = changed[0]
+    record['score'] = score
+    record['score_source'] = 'teacher'
+    lines[index] = json.dumps(record,ensure_ascii=False) + "\n"
+    import tempfile
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(os.path.abspath(LOG_FILE)), delete=False) as f:
+            temporary = f.name
+            f.writelines(lines)
+        os.replace(temporary, LOG_FILE)
+    except OSError:
+        if temporary and os.path.exists(temporary): os.remove(temporary)
+        st.error("评分未保存成功，原日志仍保留，请重试。")
+        st.stop()
 
 
 def analyze_logs_by_type(log_type):
@@ -397,12 +469,18 @@ def analyze_logs_by_type(log_type):
     with open(LOG_FILE, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
-                r = json.loads(line)
-                if r.get("log_type") == log_type:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    if st.session_state.get("teacher_auth"):
+                        st.warning("日志中有无法解析的行，原行未删除；请下载原日志核查。")
+                    continue
+                if isinstance(r, dict) and r.get("log_type") == log_type:
                     records.append(r)
     return records
 
 # 每次运行按已搭建课程生成显示编号，避免按字符串把第10章排在第2章前。
+apply_pending_widget_values()
 configure_chapter_labels(load_json(CHAPTER_STRUCTURE_FILE))
 
 # ==================== 页面 ====================
@@ -422,7 +500,8 @@ if role == "👨‍🎓 学生端":
         with col_login:
             sid = st.text_input("学号", key="login_sid")
             sname = st.text_input("姓名", key="login_sname")
-            if st.button("登录", type="primary") and sid and sname:
+            if st.button("登录", type="primary") and sid.strip() and sname.strip():
+                sid, sname = sid.strip(), sname.strip()
                 st.session_state.student_id = sid
                 st.session_state.student_name = sname
                 st.session_state.student_key = f"{sid}_{sname}"
@@ -430,11 +509,16 @@ if role == "👨‍🎓 学生端":
                 st.rerun()
         st.stop()
 
+    if st.sidebar.button("🚪 退出学生登录", key="student_logout"):
+        for session_key in list(st.session_state):
+            if session_key not in {"role", "role_select"}:
+                del st.session_state[session_key]
+        st.rerun()
     student_id = st.session_state.student_id
     student_name = st.session_state.student_name
     student_key = st.session_state.student_key
 
-    st.markdown(f"""<div class="top-bar"><span class="course-name">🛰️ 遥感技术原理与方法</span><div class="user-info"><span>{student_name}</span><div class="user-avatar">{student_name[0]}</div></div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="top-bar"><span class="course-name">🛰️ 遥感技术原理与方法</span><div class="user-info"><span>{escape(student_name)}</span><div class="user-avatar">{escape(student_name[0])}</div></div></div>""", unsafe_allow_html=True)
 
     tab_labels = ["📚 章节学习", "📋 课堂问答", "📝 章节检测", "📄 论文推荐", "🔬 ENVI实例", "💬 操作求助"]
     if "active_tab" not in st.session_state: st.session_state.active_tab = 0
@@ -474,8 +558,9 @@ if role == "👨‍🎓 学生端":
                 my_log = study_log["students"][student_key]
                 if sel_ch not in my_log: my_log[sel_ch] = {"learned": [], "current_idx": 0}
                 learned = set(my_log[sel_ch]["learned"])
-                current_idx = my_log[sel_ch]["current_idx"]
                 total = len(all_kps)
+                current_idx = min(max(int(my_log[sel_ch].get("current_idx", 0)), 0), total - 1)
+                learned = {index for index in learned if isinstance(index,int) and 0 <= index < total}
                 learned_count = len(learned)
                 pct = int(learned_count / total * 100) if total else 0
 
@@ -490,7 +575,7 @@ if role == "👨‍🎓 学生端":
                     else:
                         kp = all_kps[current_idx]
                         st.caption(f"📖 {chapter_label(sel_ch)} > {section_label(sel_ch, kp['section_title'])}")
-                        st.markdown(f"""<div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:10px 18px;border-radius:10px;color:white;margin-bottom:12px"><span style="font-size:1.1em;font-weight:bold">🔹 {kp['kp_title']}</span></div>""", unsafe_allow_html=True)
+                        st.markdown(f"""<div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:10px 18px;border-radius:10px;color:white;margin-bottom:12px"><span style="font-size:1.1em;font-weight:bold">🔹 {escape(kp['kp_title'])}</span></div>""", unsafe_allow_html=True)
                         progress_val = min(learned_count / total, 1.0) if total > 0 else 0.0
                         st.progress(progress_val, text=f"学习进度 {min(learned_count, total)}/{total}（{min(pct, 100)}%）")
                         st.markdown('<div class="kp-card">', unsafe_allow_html=True)
@@ -515,7 +600,7 @@ if role == "👨‍🎓 学生端":
                             think_answer = st.text_area("✍️ 你的回答：", height=80, key=f"think_{sel_ch}_{current_idx}")
                             if st.button("📤 提交思考题", key=f"submit_think_{sel_ch}_{current_idx}") and think_answer:
                                 with st.spinner("评阅中..."): ev = evaluate_think_answer(kp['think_question'], think_answer, sel_ch)
-                                log_interaction("think", {"student_id": student_id, "student_name": student_name, "chapter": sel_ch, "kp_title": kp['kp_title'], "think_question": kp['think_question'], "student_answer": think_answer, "evaluation": ev})
+                                log_interaction("think", {"student_id": student_id, "student_name": student_name, "chapter": sel_ch, "kp_title": kp['kp_title'], "think_question": kp['think_question'], "student_answer": think_answer, "evaluation": ev, "score": parse_score(ev)})
                                 st.success("✅ 已提交")
                             st.markdown('</div>', unsafe_allow_html=True)
                         st.markdown("---")
@@ -557,21 +642,24 @@ if role == "👨‍🎓 学生端":
                     with st.expander(f"问题{idx+1}", expanded=(idx==0)):
                         st.write(item['question'])
                         qtype = item.get('q_type', '简答题')
-                        submit_key = f"pre_qa_submitted_{sel_qa_ch}_{idx}"
+                        submit_key = "pre_qa_submitted_" + question_id({"student":student_key,"item":item,"index":idx})
                         if submit_key not in st.session_state: st.session_state[submit_key] = False
-                        if st.session_state[submit_key]: st.success("✅ 已提交")
+                        if st.session_state[submit_key]:
+                            st.success("✅ 已提交")
+                            if st.session_state.get(submit_key + "_feedback"):
+                                st.info(st.session_state[submit_key + "_feedback"])
                         else:
-                            stu_qa_answer = st.radio("你的答案：", ["A","B","C","D"], key=f"pre_qa_{sel_qa_ch}_{idx}") if qtype == "选择题" else st.text_area("✍️ 你的回答：", height=100, key=f"pre_qa_{sel_qa_ch}_{idx}")
-                            if st.button(f"📤 提交", key=f"submit_pre_qa_{sel_qa_ch}_{idx}") and stu_qa_answer:
-                                st.session_state[submit_key] = True
+                            stu_qa_answer = st.radio("你的答案：", ["A","B","C","D"], key=f"answer_{submit_key}") if qtype == "选择题" else st.text_area("✍️ 你的回答：", height=100, key=f"answer_{submit_key}")
+                            if st.button(f"📤 提交", key=f"submit_{submit_key}", disabled=deadline_passed(item.get('deadline'))) and stu_qa_answer:
                                 if qtype == "选择题":
-                                    correct = item.get('reference','').strip()[0].upper()
-                                    ev, s = ("正确", 100) if stu_qa_answer == correct else ("错误", 0)
-                                    st.write(f"{'✅ 正确' if s >= 100 else '❌ 错误'}")
+                                    s, ev = auto_grade_quiz(item['question'], item.get('reference',''), stu_qa_answer, qtype)
+                                    st.write(ev)
                                 else:
                                     s, fb = auto_grade_quiz(item['question'], item.get('reference',''), stu_qa_answer, qtype)
                                     ev = fb; st.success("✅ 已提交")
                                 log_interaction("class_qa", {"student_id": student_id, "student_name": student_name, "chapter": sel_qa_ch, "type": item['type'], "q_type": qtype, "question": item['question'], "student_answer": stu_qa_answer, "score": s, "evaluation": ev})
+                                st.session_state[submit_key] = True
+                                st.session_state[submit_key + "_feedback"] = ev
                                 st.rerun()
 
             if mid_qa:
@@ -580,21 +668,24 @@ if role == "👨‍🎓 学生端":
                     with st.expander(f"问题{idx+1}", expanded=(idx==0)):
                         st.write(item['question'])
                         qtype = item.get('q_type', '简答题')
-                        submit_key = f"mid_qa_submitted_{sel_qa_ch}_{idx}"
+                        submit_key = "mid_qa_submitted_" + question_id({"student":student_key,"item":item,"index":idx})
                         if submit_key not in st.session_state: st.session_state[submit_key] = False
-                        if st.session_state[submit_key]: st.success("✅ 已提交")
+                        if st.session_state[submit_key]:
+                            st.success("✅ 已提交")
+                            if st.session_state.get(submit_key + "_feedback"):
+                                st.info(st.session_state[submit_key + "_feedback"])
                         else:
-                            stu_qa_answer = st.radio("你的答案：", ["A","B","C","D"], key=f"mid_qa_{sel_qa_ch}_{idx}") if qtype == "选择题" else st.text_area("✍️ 你的回答：", height=100, key=f"mid_qa_{sel_qa_ch}_{idx}")
-                            if st.button(f"📤 提交", key=f"submit_mid_qa_{sel_qa_ch}_{idx}") and stu_qa_answer:
-                                st.session_state[submit_key] = True
+                            stu_qa_answer = st.radio("你的答案：", ["A","B","C","D"], key=f"answer_{submit_key}") if qtype == "选择题" else st.text_area("✍️ 你的回答：", height=100, key=f"answer_{submit_key}")
+                            if st.button(f"📤 提交", key=f"submit_{submit_key}", disabled=deadline_passed(item.get('deadline'))) and stu_qa_answer:
                                 if qtype == "选择题":
-                                    correct = item.get('reference','').strip()[0].upper()
-                                    ev, s = ("正确", 100) if stu_qa_answer == correct else ("错误", 0)
-                                    st.write(f"{'✅ 正确' if s >= 100 else '❌ 错误'}")
+                                    s, ev = auto_grade_quiz(item['question'], item.get('reference',''), stu_qa_answer, qtype)
+                                    st.write(ev)
                                 else:
                                     s, fb = auto_grade_quiz(item['question'], item.get('reference',''), stu_qa_answer, qtype)
                                     ev = fb; st.success("✅ 已提交")
                                 log_interaction("class_qa", {"student_id": student_id, "student_name": student_name, "chapter": sel_qa_ch, "type": item['type'], "q_type": qtype, "question": item['question'], "student_answer": stu_qa_answer, "score": s, "evaluation": ev})
+                                st.session_state[submit_key] = True
+                                st.session_state[submit_key + "_feedback"] = ev
                                 st.rerun()
 
     elif active == 2:
@@ -619,30 +710,25 @@ if role == "👨‍🎓 学生端":
                 for i, qi in enumerate(quiz["questions"]):
                     q_type = qi.get("q_type", "简答题")
                     st.markdown(f"**第{i+1}题**（{q_type}）：{qi['question']}")
-                    submit_key = f"quiz_submitted_{sel_idx}_{i}"
+                    submit_key = "quiz_submitted_" + question_id({"student":student_key,"chapter":quiz["chapter"],"question":qi,"index":i})
                     if submit_key not in st.session_state: st.session_state[submit_key] = False
-                    if st.session_state[submit_key]: st.success("✅ 已提交")
+                    if st.session_state[submit_key]:
+                            st.success("✅ 已提交")
+                            if st.session_state.get(submit_key + "_feedback"):
+                                st.info(st.session_state[submit_key + "_feedback"])
                     else:
-                        if q_type == "选择题": stu = st.radio("答案：", ["A","B","C","D"], key=f"qz_{i}")
-                        elif q_type == "填空题": stu = st.text_area("填空答案：", height=68, key=f"qz_{i}")
-                        else: stu = st.text_area("回答：", height=80, key=f"qz_{i}")
-                        if st.button(f"提交第{i+1}题", key=f"qsub_{i}"):
-                            st.session_state[submit_key] = True
-                            if q_type == "选择题":
-                                question_text = qi['question']
-                                option_lines = [l for l in question_text.split("\n") if l.strip().startswith(("A.","B.","C.","D."))]
-                                options = {}
-                                for ol in option_lines:
-                                    if len(ol) >= 2 and ol[1] == ".": options[ol[0]] = ol[2:].strip()
-                                selected_content = options.get(stu, "")
-                                correct_content = qi['answer'].strip()
-                                if selected_content and correct_content and (selected_content == correct_content or selected_content[:10] == correct_content[:10]): s, fb = 100, "正确"
-                                else: s, fb = 0, "错误"
-                                st.write(f"{'✅ 正确' if s >= 100 else '❌ 错误'}")
-                            else:
-                                s, fb = auto_grade_quiz(qi['question'], qi['answer'], stu, q_type)
-                                st.success("✅ 已提交")
+                        if q_type == "选择题": stu = st.radio("答案：", ["A","B","C","D"], key=f"answer_{submit_key}")
+                        elif q_type == "填空题": stu = st.text_area("填空答案：", height=68, key=f"answer_{submit_key}")
+                        else: stu = st.text_area("回答：", height=80, key=f"answer_{submit_key}")
+                        if st.button(f"提交第{i+1}题", key=f"submit_{submit_key}"):
+                            if not str(stu or "").strip():
+                                st.warning("请先填写回答，再提交。")
+                                st.stop()
+                            s, fb = auto_grade_quiz(qi['question'], qi.get('answer',''), stu, q_type)
+                            st.write(fb)
                             log_interaction("quiz", {"student_id": student_id, "student_name": student_name, "chapter": quiz['chapter'], "question": qi['question'], "q_type": q_type, "correct_answer": qi['answer'], "student_answer": stu, "score": s, "feedback": fb})
+                            st.session_state[submit_key] = True
+                            st.session_state[submit_key + "_feedback"] = fb
                             st.rerun()
 
     elif active == 3:
@@ -666,27 +752,20 @@ if role == "👨‍🎓 学生端":
         if not isinstance(cases, list) or not cases: st.info("暂无")
         else:
             sel = st.selectbox("章节：", chapter_options(list(set(c["chapter"] for c in cases))), format_func=chapter_label)
-            for c in cases:
+            for case_index, c in enumerate(cases):
                 if c["chapter"] == sel:
                     with st.expander(f"📁 {c['title']}"):
                         if c.get("is_video"): show_video(c.get("file_path",""))
                         elif c.get("is_image"): display_course_image(c.get("file_path",""))
-                        elif c.get("is_doc"):
-                            if str(c.get("file_path","")).endswith(('.docx','.doc')):
-                                try:
-                                    from docx import Document
-                                    import io
-                                    data = download_bytes(c.get("file_path",""))
-                                    doc = Document(io.BytesIO(data))
-                                    st.markdown("\n".join([p.text for p in doc.paragraphs])[:5000])
-                                except: st.markdown(c.get("content",""))
-                            else: st.markdown(c.get("content",""))
-                        else: st.markdown(c.get("content",""))
+                        else:
+                            render_case_file(c, key_prefix=f"case_file_{case_index}")
 
     elif active == 5:
         st.subheader("💬 操作求助")
-        sel_ch = st.selectbox("章节：", chapter_options(get_all_chapters()), format_func=chapter_label); q = st.text_area("描述问题：", height=120)
-        uf = st.file_uploader("上传截图", type=["png","jpg","jpeg"])
+        sel_ch = st.selectbox("章节：", chapter_options(get_all_chapters()), format_func=chapter_label)
+        q = st.text_area("描述问题：", height=120, key=f"help_question_{student_key}_{sel_ch}")
+        st.caption("截图供教师查看；自动回答依据你的文字描述和教材内容。")
+        uf = st.file_uploader("上传截图", type=["png","jpg","jpeg"], key=f"help_screenshot_{student_key}_{sel_ch}")
         if st.button("📤 提交") and q:
             sp = None
             if uf:
@@ -695,12 +774,39 @@ if role == "👨‍🎓 学生端":
                 except Exception as e:
                     st.error(f"上传失败：{e}"); st.stop()
             ctx = "\n".join(search_textbook(q, chapter_filter=sel_ch))
+            if not ctx.strip():
+                st.warning("本章节未检索到教材依据，请联系教师或调整问题描述。")
+                st.stop()
             ans = call_llm("你是遥感助教。根据课本回答。末尾标注【问题已解决】或【需要老师查看】", f"【课本】\n{ctx}\n\n【问题】\n{q}")
-            log_interaction("qa", {"student_id":student_id,"student_name":student_name,"chapter":sel_ch,"question":q,"answer":ans,"screenshot":sp or "","needs_teacher":"需要老师" in ans,"resolved":not ("需要老师" in ans)})
-            st.write(ans)
+            log_interaction("qa", {"student_id":student_id,"student_name":student_name,"chapter":sel_ch,"question":q,"answer":ans,"screenshot":sp or "","needs_teacher":"需要老师" in ans,"resolved":False})
+            st.session_state["qa_last_result"] = {"chapter":sel_ch,"answer":ans}
+        last_answer = st.session_state.get("qa_last_result")
+        if last_answer and last_answer["chapter"] == sel_ch:
+            st.write(last_answer["answer"])
+
+        my_questions = [record for record in analyze_logs_by_type("qa")
+                        if record.get("student_id") == student_id and record.get("student_name") == student_name]
+        replies = {record.get("original_ts"): record for record in analyze_logs_by_type("qa_reply")}
+        resolved = {record.get("original_ts") for record in analyze_logs_by_type("qa_resolved")}
+        if my_questions:
+            with st.expander("历史求助与教师回复"):
+                for record in reversed(my_questions):
+                    timestamp = record.get("timestamp", "")
+                    st.write(record.get("question", ""))
+                    st.caption(record.get("answer", ""))
+                    if timestamp in replies:
+                        st.info("教师回复：" + replies[timestamp].get("teacher_reply", ""))
+                    if timestamp in resolved or record.get("resolved"):
+                        st.success("已确认解决")
+                    elif st.button("确认问题已解决", key="resolve_" + question_id(timestamp)):
+                        log_interaction("qa_resolved", {"original_ts":timestamp,"student_id":student_id,"student_name":student_name})
+                        st.rerun()
 
 # ==================== 教师端 ====================
 elif role == "👩‍🏫 教师端":
+    if not TEACHER_PASSWORD:
+        st.error("教师密码未配置，请在云端 auth.teacher_password 中设置后使用教师端。")
+        st.stop()
     if "teacher_auth" not in st.session_state: st.session_state.teacher_auth = False
     if not st.session_state.teacher_auth:
         st.title("🔒 教师登录")
@@ -787,9 +893,10 @@ elif role == "👩‍🏫 教师端":
             kps = sec.get("knowledge_points", [])
 
             st.markdown("#### ➕ 添加新知识点")
-            kp_title_input = st.text_input("知识点标题：", key=f"new_kp_title_{i}", placeholder="例如：电磁辐射基本概念")
-            if st.button(f"🔍 检索课本内容", key=f"new_kp_search_{i}") and kp_title_input:
+            kp_title_input = st.text_input("知识点标题：", key=f"new_kp_title_{sel_ch}_{i}", placeholder="例如：电磁辐射基本概念")
+            if st.button(f"🔍 检索课本内容", key=f"new_kp_search_{sel_ch}_{i}") and kp_title_input:
                 with st.spinner("正在检索并整理课本内容..."): textbook = search_and_format_textbook(kp_title_input, chapter_filter=sel_ch, n_results=4)
+                stage_widget_value(f"new_kp_tb_edit_{sel_ch}_{i}", textbook)
                 st.session_state[f"new_kp_textbook_{sel_ch}_{i}"] = textbook; st.session_state[f"new_kp_title_val_{sel_ch}_{i}"] = kp_title_input
                 st.session_state[f"new_think_{sel_ch}_{i}"] = ""; st.session_state[f"new_kp_img_list_{sel_ch}_{i}"] = []; st.session_state[f"new_kp_tb_img_list_{sel_ch}_{i}"] = []
                 st.rerun()
@@ -823,8 +930,8 @@ elif role == "👩‍🏫 教师端":
 
                 st.markdown("##### 🤔 思考题")
                 if f"new_think_{sel_ch}_{i}" not in st.session_state: st.session_state[f"new_think_{sel_ch}_{i}"] = ""
-                if st.button("🎲 自动生成思考题", key=f"gen_think_btn_{i}", use_container_width=True):
-                    with st.spinner("生成中..."): st.session_state[f"new_think_{sel_ch}_{i}"] = generate_think_question(kp_title_val, edited_textbook, sel_ch)
+                if st.button("🎲 自动生成思考题", key=f"gen_think_btn_{sel_ch}_{i}", use_container_width=True):
+                    with st.spinner("生成中..."): stage_widget_value(f"new_think_{sel_ch}_{i}", generate_think_question(kp_title_val, edited_textbook, sel_ch))
                     st.rerun()
                 think_input = st.text_area("思考题：", key=f"new_think_{sel_ch}_{i}", placeholder="点击上方按钮自动生成，或手动输入")
 
@@ -875,23 +982,27 @@ elif role == "👩‍🏫 教师端":
                     save_json(structure, CHAPTER_STRUCTURE_FILE)
                     for k in [f"new_kp_title_val_{sel_ch}_{i}",f"new_kp_textbook_{sel_ch}_{i}",f"new_think_{sel_ch}_{i}",f"new_kp_img_list_{sel_ch}_{i}",f"new_kp_tb_img_list_{sel_ch}_{i}"]: st.session_state.pop(k, None)
                     st.session_state.pop(video_key, None)
+                    stage_widget_value(f"new_kp_title_{sel_ch}_{i}", "")
                     st.success(f"✅ 知识点「{kp_title_val}」已添加！"); st.rerun()
 
             if kps:
                 st.markdown("---"); st.markdown("#### 📌 已有知识点")
                 for j, kp in enumerate(kps):
+                    editor_scope = question_id([sel_ch, sec['title'], kp['title'], j])
                     with st.expander(f"📌 {j+1}. {kp['title']}", expanded=False):
-                        edit_title = st.text_input("知识点标题：", kp['title'], key=f"edit_title_{sel_ch}_{i}_{j}")
+                        edit_title = st.text_input("知识点标题：", kp['title'], key=f"edit_title_{editor_scope}")
                         st.markdown("##### 📖 课本内容")
-                        edit_textbook = st.text_area("课本内容：", kp.get('textbook_content',''), height=150, key=f"edit_tb_{sel_ch}_{i}_{j}", label_visibility="collapsed")
-                        if st.button(f"🔍 重新检索课本", key=f"re_search_{i}_{j}"):
+                        edit_textbook = st.text_area("课本内容：", kp.get('textbook_content',''), height=150, key=f"edit_tb_{editor_scope}", label_visibility="collapsed")
+                        if st.button(f"🔍 重新检索课本", key=f"re_search_{editor_scope}"):
                             with st.spinner("检索中..."): result = search_and_format_textbook(edit_title or kp['title'], chapter_filter=sel_ch, n_results=4)
-                            st.session_state[f"re_result_{sel_ch}_{i}_{j}"] = result; st.rerun()
-                        if f"re_result_{sel_ch}_{i}_{j}" in st.session_state:
-                            st.markdown("📖 **新检索结果：**"); st.text(st.session_state[f"re_result_{sel_ch}_{i}_{j}"])
-                            if st.button("✅ 采用此结果", key=f"use_re_{i}_{j}"):
-                                kp['textbook_content'] = st.session_state.pop(f"re_result_{sel_ch}_{i}_{j}")
-                                save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 已更新"); st.rerun()
+                            st.session_state[f"re_result_{editor_scope}"] = result; st.rerun()
+                        if f"re_result_{editor_scope}" in st.session_state:
+                            st.markdown("📖 **新检索结果：**"); st.text(st.session_state[f"re_result_{editor_scope}"])
+                            if st.button("✅ 采用此结果", key=f"use_re_{editor_scope}"):
+                                kp['textbook_content'] = st.session_state.pop(f"re_result_{editor_scope}")
+                                save_json(structure, CHAPTER_STRUCTURE_FILE)
+                                stage_widget_value(f"edit_tb_{editor_scope}", kp['textbook_content'])
+                                st.success("✅ 已更新"); st.rerun()
 
                         st.markdown("##### 🖼️ 课本配图")
                         tb_images = kp.get('textbook_images', []) or ([kp['textbook_image']] if kp.get('textbook_image') else [])
@@ -901,9 +1012,9 @@ elif role == "👩‍🏫 教师端":
                             for idx, img_path in enumerate(tb_images):
                                 with cols[idx % 4]:
                                     display_course_image(img_path, width=100)
-                                    if st.button("🗑️", key=f"del_edit_tb_img_{i}_{j}_{idx}"): tb_images.pop(idx); kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
-                        edit_tb_multi = st.file_uploader("补充课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_tb_multi_{sel_ch}_{i}_{j}")
-                        if st.button("上传补充课本配图", key=f"edit_tb_save_{sel_ch}_{i}_{j}", disabled=not edit_tb_multi):
+                                    if st.button("🗑️", key=f"del_edit_tb_img_{editor_scope}_{idx}"): tb_images.pop(idx); kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
+                        edit_tb_multi = st.file_uploader("补充课本配图（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_tb_multi_{editor_scope}")
+                        if st.button("上传补充课本配图", key=f"edit_tb_save_{editor_scope}", disabled=not edit_tb_multi):
                             for uf in edit_tb_multi:
                                 try:
                                     ref = upload_file(uf, folder="textbook-images")
@@ -914,16 +1025,16 @@ elif role == "👩‍🏫 教师端":
                             kp['textbook_images'] = tb_images; save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
 
                         st.markdown("##### 🤔 思考题")
-                        if f"edit_think_{sel_ch}_{i}_{j}" not in st.session_state: st.session_state[f"edit_think_{sel_ch}_{i}_{j}"] = kp.get('think_question','')
-                        if st.button("🎲 重新生成思考题", key=f"re_gen_btn_{sel_ch}_{i}_{j}", use_container_width=True):
-                            with st.spinner("生成中..."): st.session_state[f"edit_think_{sel_ch}_{i}_{j}"] = generate_think_question(edit_title or kp['title'], edit_textbook, sel_ch)
+                        if f"edit_think_{editor_scope}" not in st.session_state: st.session_state[f"edit_think_{editor_scope}"] = kp.get('think_question','')
+                        if st.button("🎲 重新生成思考题", key=f"re_gen_btn_{editor_scope}", use_container_width=True):
+                            with st.spinner("生成中..."): stage_widget_value(f"edit_think_{editor_scope}", generate_think_question(edit_title or kp['title'], edit_textbook, sel_ch))
                             st.rerun()
-                        edit_think_input = st.text_area("思考题：", key=f"edit_think_{sel_ch}_{i}_{j}", placeholder="点击上方按钮重新生成")
+                        edit_think_input = st.text_area("思考题：", key=f"edit_think_{editor_scope}", placeholder="点击上方按钮重新生成")
 
                         st.markdown("##### 🌰 生活实例")
                         current_examples = kp.setdefault('selected_examples', [])
                         existing_text = "\n".join(e.get('content','') if isinstance(e,dict) else e for e in current_examples if not (isinstance(e,dict) and e.get('type') in ('image','video')))
-                        edit_life = st.text_area("实例文字：", existing_text, height=68, key=f"edit_life_{sel_ch}_{i}_{j}")
+                        edit_life = st.text_area("实例文字：", existing_text, height=68, key=f"edit_life_{editor_scope}")
 
                         st.markdown("##### 📷 生活实例配图")
                         life_images = [e for e in current_examples if isinstance(e,dict) and e.get('type')=='image']
@@ -933,14 +1044,14 @@ elif role == "👩‍🏫 教师端":
                             for idx, e in enumerate(life_images):
                                 with cols[idx % 4]:
                                     display_course_image(e['content'], width=100)
-                                    if st.button("🗑️", key=f"del_edit_life_img_{i}_{j}_{idx}"): current_examples.remove(e); save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
+                                    if st.button("🗑️", key=f"del_edit_life_img_{editor_scope}_{idx}"): current_examples.remove(e); save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
 
                         for e in current_examples:
                             if isinstance(e,dict) and e.get('type')=='video' and e.get('content'): show_video(e['content'])
                         col_eimg, col_evid = st.columns([1,1])
                         with col_eimg:
-                            edit_img_multi = st.file_uploader("补充图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_img_multi_{sel_ch}_{i}_{j}")
-                            if st.button("上传补充实例配图", key=f"edit_img_save_{sel_ch}_{i}_{j}", disabled=not edit_img_multi):
+                            edit_img_multi = st.file_uploader("补充图片（可多选）", type=["png","jpg","jpeg"], accept_multiple_files=True, key=f"edit_img_multi_{editor_scope}")
+                            if st.button("上传补充实例配图", key=f"edit_img_save_{editor_scope}", disabled=not edit_img_multi):
                                 for uf in edit_img_multi:
                                     try:
                                         ref = upload_file(uf, folder="example-images")
@@ -951,8 +1062,8 @@ elif role == "👩‍🏫 教师端":
                                         st.error(f"上传失败：{e}"); st.stop()
                                 save_json(structure, CHAPTER_STRUCTURE_FILE); st.rerun()
                         with col_evid:
-                            edit_vid = st.file_uploader("补充视频：", type=["mp4","avi","mov"], key=f"edit_vid_{sel_ch}_{i}_{j}")
-                            if st.button("上传补充视频", key=f"edit_video_save_{sel_ch}_{i}_{j}", disabled=edit_vid is None):
+                            edit_vid = st.file_uploader("补充视频：", type=["mp4","avi","mov"], key=f"edit_vid_{editor_scope}")
+                            if st.button("上传补充视频", key=f"edit_video_save_{editor_scope}", disabled=edit_vid is None):
                                 try:
                                     vp = upload_file(edit_vid, folder="videos")
                                     item = {"type":"video","content":vp}
@@ -964,20 +1075,20 @@ elif role == "👩‍🏫 教师端":
 
                         col_save, col_del = st.columns([2,1])
                         with col_save:
-                            if st.button("💾 保存修改", key=f"save_kp_{sel_ch}_{i}_{j}"):
+                            if st.button("💾 保存修改", key=f"save_kp_{editor_scope}"):
                                 examples = []
                                 if edit_life.strip():
                                     for line in edit_life.strip().split("\n"):
                                         if line.strip(): examples.append({"type":"text","content":line.strip()})
                                 for e in current_examples:
                                     if isinstance(e,dict) and e.get('type') in ('image','video') and e.get('content'): examples.append(e)
-                                final_think = st.session_state.get(f"edit_think_{sel_ch}_{i}_{j}", edit_think_input)
-                                kp.update({"title":edit_title,"textbook_content":st.session_state.get(f"edit_tb_{sel_ch}_{i}_{j}",edit_textbook),"textbook_images":tb_images,"selected_examples":examples,"think_question":final_think})
+                                final_think = st.session_state.get(f"edit_think_{editor_scope}", edit_think_input)
+                                kp.update({"title":edit_title,"textbook_content":st.session_state.get(f"edit_tb_{editor_scope}",edit_textbook),"textbook_images":tb_images,"selected_examples":examples,"think_question":final_think})
                                 save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("✅ 已保存"); st.rerun()
                         with col_del:
-                            if st.button("🗑️ 删除", key=f"del_kp_{sel_ch}_{i}_{j}"): kps.pop(j); save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 已删除"); st.rerun()
+                            if st.button("🗑️ 删除", key=f"del_kp_{editor_scope}"): kps.pop(j); save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 已删除"); st.rerun()
 
-            if st.button(f"🗑️ 删除本节「{section_label(sel_ch, sec['title'])}」", key=f"del_sec_{i}"):
+            if st.button(f"🗑️ 删除本节「{section_label(sel_ch, sec['title'])}」", key=f"del_sec_{sel_ch}_{i}"):
                 sections.pop(i); ch_data["sections"] = sections; save_json(structure, CHAPTER_STRUCTURE_FILE); st.success("🗑️ 小节已删除"); st.rerun()
     with tabs[1]:
         st.subheader("📋 课堂问答管理")
@@ -992,6 +1103,9 @@ elif role == "👩‍🏫 教师端":
         if st.button("🎲 自动生成问题", key="class_qa_gen"):
             with st.spinner("生成中..."):
                 ctx = "\n".join(search_textbook(qa_knowledge if qa_knowledge else f"{qa_chapter} 核心知识点", chapter_filter=qa_chapter, n_results=5))
+                if not ctx.strip():
+                    st.warning("未检索到教材依据，本次未生成题目。")
+                    st.stop()
                 if qa_question_type == "选择题":
                     sp = f"围绕「{qa_knowledge or qa_chapter}」出1道单选题。输出格式：\n【题目】xxx\nA. xxx  B. xxx  C. xxx  D. xxx\n【答案】X\n【解析】xxx"
                 elif qa_question_type == "填空题":
@@ -1003,24 +1117,38 @@ elif role == "👩‍🏫 教师端":
                 q_part = result.split("【题目】")[1] if "【题目】" in result else result
                 q_text = q_part.split("【答案】")[0].split("【答案要点】")[0].strip()
                 a_text = q_part.split("【答案】")[1].split("【解析】")[0].strip() if "【答案】" in q_part else (q_part.split("【答案要点】")[1].strip() if "【答案要点】" in q_part else "")
+                st.session_state["class_qa_generated_scope"] = question_id([qa_chapter,qa_question_type,qa_type])
                 st.session_state["class_qa_generated_q"] = q_text; st.session_state["class_qa_generated_a"] = a_text
+                stage_widget_value("class_qa_input_q_edit", q_text)
+                stage_widget_value("class_qa_input_a_edit", a_text)
                 st.rerun()
 
+        if st.session_state.get("class_qa_generated_q") and st.button("清除生成草稿", key="clear_class_qa_draft"):
+            for draft_key in ("class_qa_generated_q","class_qa_generated_a","class_qa_generated_scope"):
+                st.session_state.pop(draft_key, None)
+            for widget_key in ("class_qa_input_q_edit","class_qa_input_a_edit","class_qa_input","class_qa_ref"):
+                stage_widget_value(widget_key, "")
+            st.rerun()
         if "class_qa_generated_q" in st.session_state: qa_question = st.text_area("输入问题（可编辑）：", value=st.session_state["class_qa_generated_q"], key="class_qa_input_q_edit")
         if "class_qa_generated_a" in st.session_state: ref_answer = st.text_area("参考答案：", value=st.session_state["class_qa_generated_a"], key="class_qa_input_a_edit")
         else: ref_answer = st.text_area("参考答案（可选）：", key="class_qa_ref", placeholder="可留空")
 
-        deadline_date = st.date_input("截止日期：", key="class_qa_deadline_date")
-        deadline_time = st.time_input("截止时间：", key="class_qa_deadline_time")
-        deadline = f"{deadline_date} {deadline_time.strftime('%H:%M')}" if deadline_date else ""
+        use_deadline = st.checkbox("设置截止时间", value=False, key="class_qa_use_deadline")
+        deadline_date = st.date_input("截止日期：", value=course_now().date(), key="class_qa_deadline_date")
+        deadline_time = st.time_input("截止时间：", value=course_now().time().replace(second=0, microsecond=0), key="class_qa_deadline_time")
+        deadline = f"{deadline_date} {deadline_time.strftime('%H:%M')}" if use_deadline and deadline_date else ""
 
         if st.button("📤 发布问题", key="class_qa_publish"):
+            generated_scope = st.session_state.get("class_qa_generated_scope")
+            if generated_scope and generated_scope != question_id([qa_chapter,qa_question_type,qa_type]):
+                st.warning("生成题目后章节或题型已改变，请重新生成，或清除生成草稿后手动录入。")
+                st.stop()
             final_q = qa_question or st.session_state.get("class_qa_generated_q", "")
             final_a = ref_answer or st.session_state.get("class_qa_generated_a", "")
             if final_q:
-                class_qa.append({"chapter":qa_chapter,"type":qa_type,"question":final_q,"q_type":qa_question_type,"reference":final_a,"deadline":deadline,"time":datetime.now().strftime("%Y-%m-%d %H:%M")})
+                class_qa.append({"chapter":qa_chapter,"type":qa_type,"question":final_q,"q_type":qa_question_type,"reference":final_a,"deadline":deadline,"time":course_now().strftime("%Y-%m-%d %H:%M")})
                 save_json(class_qa, CLASS_QA_FILE); st.success(f"✅ 已发布：{qa_type}（{qa_question_type}）- {final_q[:50]}...")
-                for k in ["class_qa_generated","class_qa_generated_q","class_qa_generated_a"]:
+                for k in ["class_qa_generated","class_qa_generated_q","class_qa_generated_a","class_qa_generated_scope"]:
                     if k in st.session_state: st.session_state.pop(k)
                 st.rerun()
             else: st.warning("请输入问题")
@@ -1035,7 +1163,7 @@ elif role == "👩‍🏫 教师端":
                 ch = item.get('chapter','未知'); tp = item.get('type','')
                 chapter_dict.setdefault(ch,{}).setdefault(tp,[]).append(item)
             for ch, types in chapter_dict.items():
-                st.markdown(f"#### 📚 {ch}")
+                st.markdown(f"#### 📚 {chapter_label(ch)}")
                 for tp, items in types.items():
                     icon = "📖" if tp == "课前预习检测" else "📝"
                     st.markdown(f"**{icon} {tp}**（{len(items)}题）")
@@ -1044,7 +1172,7 @@ elif role == "👩‍🏫 教师端":
                             st.write(f"**问题**：{item['question']}")
                             if item.get('reference'): st.write(f"**参考答案**：{item['reference']}")
                             if item.get('deadline'): st.write(f"⏰ 截止：{item['deadline']}")
-                            if st.button("🗑️ 删除", key=f"del_qa_{item.get('time','')}_{idx}"): class_qa.remove(item); save_json(class_qa, CLASS_QA_FILE); st.rerun()
+                            if st.button("🗑️ 删除", key=f"del_qa_{question_id([ch,tp,item,idx])}"): class_qa.remove(item); save_json(class_qa, CLASS_QA_FILE); st.rerun()
 
     with tabs[2]:
         st.subheader("发布章节检测")
@@ -1063,8 +1191,17 @@ elif role == "👩‍🏫 教师端":
                     for qtype, cnt in [("选择题",choice_count),("填空题",fill_count),("简答题",essay_count)]:
                         if cnt > 0:
                             qs = generate_quiz_questions(sel, qtype, cnt)
-                            if qs and "题目" in qs: all_questions.append((qtype, qs))
-                st.session_state["gen_quiz_mixed"] = all_questions; st.rerun()
+                            if qs and "题目" in qs:
+                                all_questions.append((qtype, qs))
+
+                if not all_questions:
+                    st.error("模型未返回可识别的题目，原草稿保留，请重试。")
+                    st.stop()
+                for generated_type, generated_text in all_questions:
+                    stage_widget_value(f"quiz_edit_{generated_type}", generated_text)
+                st.session_state["gen_quiz_mixed"] = all_questions
+                st.session_state["gen_quiz_chapter"] = sel
+                st.rerun()
 
         if "gen_quiz_mixed" in st.session_state:
             st.markdown("---"); st.markdown("### 生成的题目（可编辑）")
@@ -1074,30 +1211,19 @@ elif role == "👩‍🏫 教师端":
                 edited_text = st.text_area(f"{q_type}题目：", raw_text, height=200, key=f"quiz_edit_{q_type}")
                 edited_all.append((q_type, edited_text))
             if st.button("📤 发布章节检测", key="publish_quiz_btn"):
+                if st.session_state.get("gen_quiz_chapter", sel) != sel:
+                    st.warning("生成题目后章节已改变，请切回原章节或重新生成。")
+                    st.stop()
                 quizzes = load_json(QUIZ_FILE)
                 if not isinstance(quizzes, list): quizzes = []
                 questions = []
                 for q_type, text in edited_all:
-                    for block in text.split("题目")[1:]:
-                        lines = block.strip().split("\n")
-                        if lines:
-                            first_line = lines[0]
-                            q_text = first_line.split("：",1)[-1].strip() if "：" in first_line else first_line.strip()
-                            full_question = block.strip()
-                            clean_lines = []
-                            for line in full_question.split("\n"):
-                                if line.startswith("答案：") or line.startswith("正确选项内容：") or line.startswith("解析：") or line.startswith("参考答案要点：") or line.startswith("参考答案"): break
-                                clean_lines.append(line)
-                            full_question = "\n".join(clean_lines).strip()
-                            ans = ""
-                            for line in lines:
-                                if "答案：" in line: ans = line.split("答案：")[-1].strip()
-                                elif "正确选项内容：" in line: ans = line.split("正确选项内容：")[-1].strip()
-                                elif "参考答案要点：" in line: ans = line.split("参考答案要点：")[-1].strip()
-                            if q_text: questions.append({"question":full_question,"answer":ans or "教师未提供参考答案","q_type":q_type})
+                    questions.extend(parse_quiz_text(text, q_type))
                 if questions:
                     quizzes.append({"chapter":sel,"q_type":"混合","questions":questions})
-                    save_json(quizzes, QUIZ_FILE); st.success(f"✅ 发布 {len(questions)} 道题（选择{choice_count}/填空{fill_count}/简答{essay_count}）")
+                    save_json(quizzes, QUIZ_FILE)
+                    actual_counts = {kind: sum(q['q_type'] == kind for q in questions) for kind in ('选择题','填空题','简答题')}
+                    st.success(f"✅ 发布 {len(questions)} 道题（选择{actual_counts['选择题']}/填空{actual_counts['填空题']}/简答{actual_counts['简答题']}）")
                     del st.session_state["gen_quiz_mixed"]; st.rerun()
                 else: st.error("题目解析失败，请检查格式")
 
@@ -1176,7 +1302,7 @@ elif role == "👩‍🏫 教师端":
                 st.error(f"上传失败：{e}"); st.stop()
             is_vid = ud.name.lower().endswith(('.mp4','.avi','.mov'))
             is_img = ud.name.lower().endswith(('.png','.jpg','.jpeg'))
-            is_doc = ud.name.lower().endswith(('.docx','.doc','.txt'))
+            is_doc = ud.name.lower().endswith(('.docx','.doc','.txt','.pdf'))
             cnt = ""
             if is_doc:
                 if ud.name.endswith('.txt'):
@@ -1185,20 +1311,26 @@ elif role == "👩‍🏫 教师端":
                     cnt = f"文件已保存：{fp}"
             cases = load_json(CASE_FILE)
             if not isinstance(cases, list): cases = []
-            cases.append({"chapter":sel,"title":ct,"content":cnt,"file_path":fp,"is_video":is_vid,"is_image":is_img,"is_doc":is_doc,"upload_time":datetime.now().strftime("%Y-%m-%d %H:%M")})
+            cases.append({"chapter":sel,"title":ct,"original_filename":ud.name,"content":cnt,"file_path":fp,"is_video":is_vid,"is_image":is_img,"is_doc":is_doc,"upload_time":course_now().strftime("%Y-%m-%d %H:%M")})
             save_json(cases, CASE_FILE); st.success("✅ 已上传"); st.rerun()
 
     with tabs[5]:
         st.subheader("学生操作问题")
-        qa = analyze_logs_by_type("qa"); unresolved = [r for r in qa if not r.get("resolved",False)]
+        qa = analyze_logs_by_type("qa")
+        replied = {record.get("original_ts") for record in analyze_logs_by_type("qa_reply")}
+        resolved = {record.get("original_ts") for record in analyze_logs_by_type("qa_resolved")}
+        unresolved = [r for r in qa if not r.get("resolved",False) and r.get("timestamp") not in replied | resolved]
         st.metric("待处理", len(unresolved))
         for i, r in enumerate(unresolved):
             with st.expander(f"🔴 {r['student_name']} - {r['timestamp'][:19]}"):
                 st.write(r['question'])
                 if r.get("screenshot"): display_course_image(r["screenshot"])
-                if st.button("📤 发送", key=f"send_{i}") and (rp := st.text_area("回复：", key=f"reply_{i}")):
-                    r["teacher_reply"] = rp; r["resolved"] = True
-                    log_interaction("qa_reply", {"original_ts":r["timestamp"],"student_id":r["student_id"],"teacher_reply":rp}); st.success("✅"); st.rerun()
+                reply_key = question_id(r.get("timestamp", i))
+                rp = st.text_area("回复：", key=f"reply_{reply_key}")
+                if st.button("📤 发送", key=f"send_{reply_key}", disabled=not rp.strip()):
+                    log_interaction("qa_reply", {"original_ts":r["timestamp"],"student_id":r["student_id"],"student_name":r.get("student_name", ""),"teacher_reply":rp})
+                    st.success("✅ 回复已保存，学生可在历史求助中查看。")
+                    st.rerun()
 
     with tabs[6]:
         st.subheader("📊 学情总览")
@@ -1241,8 +1373,9 @@ elif role == "👩‍🏫 教师端":
                             if not think_q: status_color, status_text = "#e0e0e0","—"
                             elif not student_think: status_color, status_text = "#9e9e9e","未做"
                             else:
-                                score = student_think[-1].get('score',0)
-                                if score>=80: status_color, status_text = "#4caf50","✓"
+                                score = numeric_score(student_think[-1])
+                                if score < 0: status_color, status_text = "#607d8b", "待复核"
+                                elif score>=80: status_color, status_text = "#4caf50","✓"
                                 elif score>=40: status_color, status_text = "#ff9800","△"
                                 else: status_color, status_text = "#f44336","✗"
                             if show_mode=="仅显示错题" and status_color not in ["#f44336","#ff9800"]: continue
@@ -1272,8 +1405,8 @@ elif role == "👩‍🏫 教师端":
                             stu_dict = {}
                             for r in data: k = f"{r['student_id']}{r['student_name']}"; stu_dict.setdefault(k,[]).append(r)
                             for stu, recs in stu_dict.items():
-                                correct = sum(1 for r in recs if r.get('score',0)>=80)
-                                with st.expander(f"{stu} | 共{len(recs)}题 | 正确{correct}"):
+                                correct = sum(1 for r in recs if numeric_score(r)>=80); pending = sum(1 for r in recs if numeric_score(r)<0)
+                                with st.expander(f"{stu} | 共{len(recs)}题 | 正确{correct} | 待复核{pending}"):
                                     if st.button(f"🗑️ 删除{stu}的{label}问答", key=f"del_cqa_{label}_{stu}"):
                                         all_lines = []
                                         if os.path.exists(LOG_FILE):
@@ -1286,7 +1419,7 @@ elif role == "👩‍🏫 教师端":
                                                     except: f.write(line)
                                         st.success(f"✅ {stu}的{label}问答已删除"); st.rerun()
                                     for r in recs:
-                                        score = r.get('score',0); icon = "✅" if score>=80 else "❌"
+                                        score = numeric_score(r); icon = score_icon(r)
                                         q_type = r.get('q_type',''); question = r.get('question','')
                                         st.markdown(f"{icon} **{q_type}**")
                                         if q_type=="选择题":
@@ -1298,7 +1431,14 @@ elif role == "👩‍🏫 教师端":
                                         st.write(f"**回答**：{r.get('student_answer','')[:80]}")
                                         ref = r.get('reference','') or r.get('evaluation','')
                                         if ref: st.write(f"**参考答案**：{ref[:80]}")
-                                        st.caption(f"评分：{score}分"); st.markdown("---")
+                                        st.caption(f"评分：{score_label(r)}")
+                                        if r.get('timestamp'):
+                                            review_key = question_id([r['timestamp'],r.get('question'),r.get('student_id')])
+                                            reviewed_score = st.number_input("课堂问答复核评分", min_value=0.0, max_value=100.0, value=float(max(0,numeric_score(r))), key=f"class_review_{review_key}")
+                                            if st.button("保存复核评分", key=f"class_review_save_{review_key}"):
+                                                update_log_score(r['timestamp'], reviewed_score)
+                                                st.rerun()
+                                        st.markdown("---")
                             with st.expander(f"📊 全班总览（{label}）", expanded=True):
                                 q_unique = {}
                                 for r in data:
@@ -1307,11 +1447,11 @@ elif role == "👩‍🏫 教师端":
                                     q_unique[q_text]["answers"].append(r)
                                 st.write(f"**共 {len(q_unique)} 道{label}题**")
                                 for i, (q_text, q_data) in enumerate(q_unique.items()):
-                                    total = len(q_data["answers"]); correct = sum(1 for a in q_data["answers"] if a.get('score',0)>=80)
-                                    st.write(f"**第{i+1}题**（{q_data['q_type']}）：{q_text[:200]}"); st.write(f"答对：{correct}人 | 答错：{total-correct}人")
+                                    total = len(q_data["answers"]); correct = sum(1 for a in q_data["answers"] if numeric_score(a)>=80); pending = sum(1 for a in q_data["answers"] if numeric_score(a)<0)
+                                    st.write(f"**第{i+1}题**（{q_data['q_type']}）：{q_text[:200]}"); st.write(f"答对：{correct}人 | 答错：{total-correct-pending}人 | 待复核：{pending}人")
                                     st.write(f"**参考答案**：{q_data['reference'][:80] if q_data['reference'] else '无'}")
                                     for a in q_data["answers"]:
-                                        icon = "✅" if a.get('score',0)>=80 else "❌"
+                                        icon = score_icon(a)
                                         st.write(f"{icon} {a.get('student_id','')}{a.get('student_name','')}：{a.get('student_answer','')[:60]}")
                                     st.markdown("---")
 
@@ -1322,8 +1462,8 @@ elif role == "👩‍🏫 教师端":
                 stu_dict = {}
                 for r in qr: k = f"{r['student_id']}{r['student_name']}"; stu_dict.setdefault(k,[]).append(r)
                 for stu, recs in stu_dict.items():
-                    total = len(recs); correct = sum(1 for r in recs if r.get('score',0)>=80)
-                    with st.expander(f"{stu} | 共{total}题 | ✅{correct} ❌{total-correct}"):
+                    total = len(recs); correct = sum(1 for r in recs if numeric_score(r)>=80); pending = sum(1 for r in recs if numeric_score(r)<0)
+                    with st.expander(f"{stu} | 共{total}题 | ✅{correct} ❌{total-correct-pending} ⏳{pending}"):
                         if st.button(f"🗑️ 删除{stu}的章节检测", key=f"del_quiz_{stu}"):
                             all_lines = []
                             if os.path.exists(LOG_FILE):
@@ -1336,26 +1476,17 @@ elif role == "👩‍🏫 教师端":
                                         except: f.write(line)
                             st.success(f"✅ {stu}的章节检测已删除"); st.rerun()
                         for i, r in enumerate(recs):
-                            is_correct = r.get('score',0)>=80; icon = "✅" if is_correct else "❌"
+                            is_correct = numeric_score(r)>=80; icon = score_icon(r)
                             q_type = r.get('q_type','')
                             st.markdown(f"**{icon} 第{i+1}题（{q_type}）**"); st.write(r['question'][:100])
                             st.write(f"**学生答案**：{r.get('student_answer','')[:100]}")
                             if q_type!='选择题': st.write(f"**参考答案**：{r.get('correct_answer','')[:100]}")
-                            st.write(f"**得分**：{r.get('score',0)}分")
+                            st.write(f"**得分**：{score_label(r)}")
                             if q_type!='选择题':
-                                new_score = st.slider("修改评分",0,100,r.get('score',0), key=f"qs_{r['timestamp']}")
+                                new_score = st.number_input("修改评分（待复核时初始值不是已评成绩）", min_value=0.0, max_value=100.0, value=float(max(0, numeric_score(r))), key=f"qs_{r['timestamp']}")
                                 if st.button("💾 保存", key=f"qsave_{r['timestamp']}"):
                                     r['score'] = new_score
-                                    all_lines = []
-                                    if os.path.exists(LOG_FILE):
-                                        with open(LOG_FILE,"r",encoding="utf-8") as f: all_lines = f.readlines()
-                                        with open(LOG_FILE,"w",encoding="utf-8") as f:
-                                            for line in all_lines:
-                                                try:
-                                                    record = json.loads(line)
-                                                    if record.get('timestamp')==r['timestamp']: record['score']=new_score
-                                                    f.write(json.dumps(record,ensure_ascii=False)+"\n")
-                                                except: f.write(line)
+                                    update_log_score(r['timestamp'], new_score)
                                     st.success("✅ 已保存"); st.rerun()
                             st.markdown("---")
                 with st.expander("📊 全班总览（章节检测）", expanded=True):
@@ -1366,11 +1497,11 @@ elif role == "👩‍🏫 教师端":
                         q_unique[q_text]["answers"].append(r)
                     st.write(f"**共 {len(q_unique)} 道检测题**")
                     for i, (q_text, q_data) in enumerate(q_unique.items()):
-                        total = len(q_data["answers"]); correct = sum(1 for a in q_data["answers"] if a.get('score',0)>=80)
-                        st.write(f"**第{i+1}题**（{q_data['q_type']}）：{q_text[:200]}"); st.write(f"答对：{correct}人 | 答错：{total-correct}人")
+                        total = len(q_data["answers"]); correct = sum(1 for a in q_data["answers"] if numeric_score(a)>=80); pending = sum(1 for a in q_data["answers"] if numeric_score(a)<0)
+                        st.write(f"**第{i+1}题**（{q_data['q_type']}）：{q_text[:200]}"); st.write(f"答对：{correct}人 | 答错：{total-correct-pending}人 | 待复核：{pending}人")
                         if q_data['q_type']!='选择题': st.write(f"**参考答案**：{q_data['correct_answer'][:80]}")
                         for a in q_data["answers"]:
-                            icon = "✅" if a.get('score',0)>=80 else "❌"
+                            icon = score_icon(a)
                             st.write(f"{icon} {a.get('student_id','')}{a.get('student_name','')}：{a.get('student_answer','')[:60]}")
                         st.markdown("---")
 
@@ -1410,3 +1541,4 @@ elif role == "👩‍🏫 教师端":
                 st.success("✅ 全部已清空"); st.rerun()
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE,"r",encoding="utf-8") as f: st.download_button("📥 下载日志", f.read(), file_name="full_log.jsonl", key="dl_log")
+
